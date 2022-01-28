@@ -55,7 +55,7 @@ pub enum TokenError {
 
 impl<'a> TokenParser<'a> {
 	/// Convert a string to a series of tokens
-	fn new(s: &'a str) -> Self {
+	pub fn new(s: &'a str) -> Self {
 		Self {
 			s,
 			start: 0,

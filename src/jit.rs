@@ -126,7 +126,7 @@ where
 {
 	fn new(resolve_fn: F) -> Self {
 		let mut jit = dynasmrt::x64::Assembler::new().unwrap();
-		dynasm!(jit ; push rax);
+		dynasm!(jit ; push rdi);
 		Self {
 			jit,
 			data: Default::default(),
@@ -138,7 +138,7 @@ where
 
 	fn finish(mut self) -> Function {
 		dynasm!(self.jit
-			; pop rax
+			; pop rdi
 			; ret
 		);
 		let data_offset = self.jit.offset();

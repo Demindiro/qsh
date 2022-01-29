@@ -3,11 +3,15 @@ use crate::runtime::*;
 use core::fmt;
 use core::mem;
 use dynasmrt::{dynasm, AssemblyOffset, DynasmApi, DynasmLabelApi, ExecutableBuffer};
+use std::collections::BTreeMap;
+use std::rc::Rc;
 
 /// A JIT-compiled function that can be called.
 pub struct Function {
 	exec: ExecutableBuffer,
 	data_offset: AssemblyOffset,
+	#[cfg(feature = "iced")]
+	symbols: Rc<BTreeMap<usize, Box<str>>>,
 }
 
 impl Function {
@@ -27,9 +31,9 @@ impl fmt::Debug for Function {
 			SymResTextInfo, SymResTextPart, SymbolResolver, SymbolResult,
 		};
 		let mut dec = Decoder::new(64, &self.exec[..self.data_offset.0], 0);
-		struct Symbols {
-			data: u64,
-		}
+
+		struct Symbols(Rc<BTreeMap<usize, Box<str>>>);
+
 		impl SymbolResolver for Symbols {
 			fn symbol(
 				&mut self,
@@ -39,12 +43,11 @@ impl fmt::Debug for Function {
 				address: u64,
 				_: u32,
 			) -> Option<SymbolResult<'_>> {
-				/* TODO fix this
-				address.checked_sub(self.data).map(|offt| {
+				self.0.get(&address.try_into().unwrap()).map(|s| {
 					// "How many data structures do you want?" "Yes"
 					// implement From<&str> pls
 					let text = SymResTextInfo::Text(SymResTextPart {
-						text: SymResString::String(format!("@data[{}]", offt.to_string())),
+						text: SymResString::Str(&*s),
 						color: FormatterTextKind::Label,
 					});
 					SymbolResult {
@@ -54,16 +57,11 @@ impl fmt::Debug for Function {
 						symbol_size: None,
 					}
 				})
-				*/
-				None
 			}
 		}
-		let mut fmt = IntelFormatter::with_options(
-			Some(Box::new(Symbols {
-				data: self.data_offset.0.try_into().unwrap(),
-			})),
-			None,
-		);
+
+		let mut fmt =
+			IntelFormatter::with_options(Some(Box::new(Symbols(self.symbols.clone()))), None);
 		fmt.options_mut().set_digit_separator("_");
 		fmt.options_mut().set_hex_prefix("0x");
 		fmt.options_mut().set_hex_suffix("");
@@ -74,6 +72,9 @@ impl fmt::Debug for Function {
 			s.clear();
 			let instr = dec.decode();
 			fmt.format(&instr, &mut s);
+			if let Some(s) = self.symbols.get(&instr.ip().try_into().unwrap()) {
+				writeln!(f, "{}:", s)?;
+			}
 			write!(f, "{:4x}  ", instr.ip())?;
 			for b in &self.exec[instr.ip() as usize..][..instr.len()] {
 				write!(f, "{:02x}", b)?;
@@ -114,6 +115,8 @@ where
 	jit: dynasmrt::x64::Assembler,
 	data: Vec<Value>,
 	resolve_fn: F,
+	#[cfg(feature = "iced")]
+	symbols: BTreeMap<usize, Box<str>>,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -126,8 +129,10 @@ where
 		dynasm!(jit ; push rax);
 		Self {
 			jit,
-			data: Vec::new(),
+			data: Default::default(),
 			resolve_fn,
+			#[cfg(feature = "iced")]
+			symbols: Default::default(),
 		}
 	}
 
@@ -141,6 +146,11 @@ where
 			; .align 8
 			; data:
 		);
+		#[cfg(feature = "iced")]
+		for i in 0..self.data.len() {
+			self.symbols
+				.insert(data_offset.0, format!("data+{}", i * 16).into());
+		}
 		for d in self.data {
 			let [a, b] = unsafe { mem::transmute::<_, [u64; 2]>(d) };
 			self.jit.push_u64(a);
@@ -149,6 +159,8 @@ where
 		Function {
 			exec: self.jit.finalize().unwrap(),
 			data_offset,
+			#[cfg(feature = "iced")]
+			symbols: Rc::new(self.symbols),
 		}
 	}
 
@@ -167,6 +179,11 @@ where
 					if push_fn_name {
 						self.data.push(Value::String((&*function).into()));
 					}
+					#[cfg(feature = "iced")]
+					self.symbols.insert(
+						f as usize,
+						push_fn_name.then(|| "exec".into()).unwrap_or(function),
+					);
 					for a in arguments.iter() {
 						let v = match a {
 							Argument::String(s) => Value::String((&**s).into()),
@@ -210,6 +227,8 @@ where
 							; if_true:
 						);
 					} else {
+						#[cfg(feature = "iced")]
+						self.symbols.insert(self.jit.offset().0, "if_false".into());
 						dynasm!(self.jit
 							; if_false:
 						);

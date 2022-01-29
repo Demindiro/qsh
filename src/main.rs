@@ -1,3 +1,4 @@
+#![feature(const_discriminant)]
 #![feature(if_let_guard)]
 
 mod jit;

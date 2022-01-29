@@ -3,7 +3,7 @@ use crate::runtime::*;
 use core::fmt;
 use core::mem;
 use dynasmrt::{dynasm, AssemblyOffset, DynasmApi, DynasmLabelApi, ExecutableBuffer};
-use std::collections::BTreeMap;
+use std::collections::{btree_map::Entry, BTreeMap};
 use std::rc::Rc;
 
 /// A JIT-compiled function that can be called.
@@ -115,6 +115,7 @@ where
 	jit: dynasmrt::x64::Assembler,
 	data: Vec<Value>,
 	resolve_fn: F,
+	variables: BTreeMap<Box<str>, usize>,
 	#[cfg(feature = "iced")]
 	symbols: BTreeMap<usize, Box<str>>,
 }
@@ -131,16 +132,19 @@ where
 			jit,
 			data: Default::default(),
 			resolve_fn,
+			variables: Default::default(),
 			#[cfg(feature = "iced")]
 			symbols: Default::default(),
 		}
 	}
 
 	fn finish(mut self) -> Function {
-		dynasm!(self.jit
-			; pop rdi
-			; ret
-		);
+		match self.variables.len() * 16 + 8 {
+			8 => dynasm!(self.jit ; pop rdi),
+			l if let Ok(l) = l.try_into() => dynasm!(self.jit ; add rsp, BYTE l),
+			l => dynasm!(self.jit ; add rsp, l.try_into().unwrap()),
+		}
+		dynasm!(self.jit ; ret);
 		let data_offset = self.jit.offset();
 		dynasm!(self.jit
 			; .align 8
@@ -165,6 +169,13 @@ where
 	}
 
 	fn compile(&mut self, ops: Box<[Op]>) {
+		let push_stack = |jit: &mut dynasmrt::x64::Assembler, v: i64| {
+			match v {
+			v if let Ok(v) = v.try_into() => dynasm!(jit ; push BYTE v),
+			v if let Ok(v) = v.try_into() => dynasm!(jit ; push DWORD v),
+			v => dynasm!(jit ; mov rsi, QWORD v; push rsi),
+		}
+		};
 		for op in ops.into_vec() {
 			match op {
 				Op::Call {
@@ -184,24 +195,71 @@ where
 						f as usize,
 						push_fn_name.then(|| "exec".into()).unwrap_or(function),
 					);
-					for a in arguments.iter() {
-						let v = match a {
-							Argument::String(s) => Value::String((&**s).into()),
-							_ => todo!("argument {:?}", a),
-						};
-						self.data.push(v);
-					}
+
+					let use_stack = arguments.iter().any(|a| match a {
+						Argument::Variable(_) => true,
+						_ => false,
+					});
 					let len = arguments.len() + push_fn_name.then(|| 1).unwrap_or(0);
-					if let Ok(n) = len.try_into() {
-						dynasm!(self.jit ; mov edi, DWORD n);
+
+					if use_stack {
+						// Note that stack pushing is top-down
+						for (i, a) in arguments.iter().rev().enumerate() {
+							let v = match a {
+								Argument::String(s) => Value::String((&**s).into()),
+								Argument::Variable(v) => {
+									let offt = self.variables.len() - self.variables[v] - 1;
+									dbg!(offt, i);
+									let offt = ((offt + i) * 16 + 8).try_into().unwrap();
+									dynasm!(self.jit
+										; push QWORD [rsp + offt]
+										; push QWORD [rsp + offt]
+									);
+									continue;
+								}
+								_ => todo!("argument {:?}", a),
+							};
+							let [a, b] = unsafe { mem::transmute_copy::<_, [i64; 2]>(&v) };
+							push_stack(&mut self.jit, b);
+							push_stack(&mut self.jit, a);
+							self.data.push(v);
+						}
+						if let Ok(n) = len.try_into() {
+							dynasm!(self.jit ; mov edi, DWORD n);
+						} else {
+							dynasm!(self.jit ; mov rdi, len.try_into().unwrap())
+						}
+						dynasm!(self.jit
+							; mov rsi, rsp
+							; mov rax, QWORD f as _
+							; call rax
+						);
+						let len = len * 16;
+						if let Ok(n) = len.try_into() {
+							dynasm!(self.jit ; add rsp, BYTE n);
+						} else {
+							dynasm!(self.jit ; add rsp, len.try_into().unwrap())
+						}
 					} else {
-						dynasm!(self.jit ; mov rdi, len.try_into().unwrap())
+						for a in arguments.iter() {
+							let v = match a {
+								Argument::String(s) => Value::String((&**s).into()),
+								Argument::Variable(_) => unreachable!(),
+								_ => todo!("argument {:?}", a),
+							};
+							self.data.push(v);
+						}
+						if let Ok(n) = len.try_into() {
+							dynasm!(self.jit ; mov edi, DWORD n);
+						} else {
+							dynasm!(self.jit ; mov rdi, len.try_into().unwrap())
+						}
+						dynasm!(self.jit
+							; lea rsi, [>data + (i * 16).try_into().unwrap()]
+							; mov rax, QWORD f as _
+							; call rax
+						);
 					}
-					dynasm!(self.jit
-						; lea rsi, [>data + (i * 16).try_into().unwrap()]
-						; mov rax, QWORD f as _
-						; call rax
-					);
 				}
 				Op::If {
 					condition,
@@ -234,6 +292,25 @@ where
 						);
 					}
 				}
+				Op::Assign {
+					variable,
+					statement,
+				} => {
+					let i = self.variables.len();
+					match self.variables.entry(variable) {
+						Entry::Vacant(e) => {
+							let v = match statement {
+								Argument::String(s) => Value::String((&*s).into()),
+								_ => todo!("assign {:?}", statement),
+							};
+							let [a, b] = unsafe { mem::transmute::<_, [i64; 2]>(v) };
+							push_stack(&mut self.jit, b);
+							push_stack(&mut self.jit, a);
+							e.insert(i);
+						}
+						Entry::Occupied(_) => todo!("occupied"),
+					}
+				}
 				op => todo!("parse {:?}", op),
 			}
 		}
@@ -255,7 +332,9 @@ mod test {
 	fn print(args: &[TValue]) -> isize {
 		OUT.with(|out| {
 			let mut out = out.borrow_mut();
+			dbg!(args);
 			for (i, a) in args.iter().enumerate() {
+				dbg!(unsafe { mem::transmute_copy::<_, [u64; 2]>(a) });
 				(i > 0).then(|| out.push(' '));
 				out.extend(a.to_string().chars());
 			}
@@ -296,6 +375,7 @@ mod test {
 		clear_out();
 		let ops = parse(TokenParser::new(s).map(Result::unwrap)).unwrap();
 		let f = compile(ops, resolve_fn);
+		dbg!(&f);
 		f.call(&[]);
 	}
 
@@ -323,5 +403,11 @@ mod test {
 		OUT.with(|out| assert_eq!("yes\n", &*out.borrow()));
 		run("if false; print yes");
 		OUT.with(|out| assert_eq!("", &*out.borrow()));
+	}
+
+	#[test]
+	fn variable() {
+		run("@a = 5; @b = \"five\"; print @a is pronounced as @b");
+		OUT.with(|out| assert_eq!("5 is pronounced as five\n", &*out.borrow()));
 	}
 }

@@ -159,6 +159,15 @@ fn parse_inner<'a>(
 					ops.push(Op::Return {
 						statement: Argument::Variable(s.into()),
 					})
+				} else if tokens.peek() == Some(&Token::Word("=")) {
+					tokens.next().unwrap();
+					ops.push(Op::Assign {
+						variable: s.into(),
+						// TODO parse_expr would be a better fit
+						statement: parse_arg(tokens)?,
+					})
+				} else {
+					todo!("variable {}", s);
 				}
 			}
 			Token::Integer(s) => {
@@ -245,6 +254,35 @@ mod test {
 				.into(),
 				if_false: [].into(),
 			}]
+		);
+	}
+
+	#[test]
+	fn variable() {
+		let s = "@a = $5; @b = \"five\"; print @a is pronounced as @b";
+		assert_eq!(
+			&*parse(TokenParser::new(s).map(Result::unwrap)).unwrap(),
+			[
+				Op::Assign {
+					variable: "a".into(),
+					statement: Argument::Integer(5),
+				},
+				Op::Assign {
+					variable: "b".into(),
+					statement: Argument::String("five".into()),
+				},
+				Op::Call {
+					function: "print".into(),
+					arguments: [
+						Argument::Variable("a".into()),
+						Argument::String("is".into()),
+						Argument::String("pronounced".into()),
+						Argument::String("as".into()),
+						Argument::Variable("b".into()),
+					]
+					.into(),
+				},
+			]
 		);
 	}
 }

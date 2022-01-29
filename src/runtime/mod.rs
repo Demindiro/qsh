@@ -3,11 +3,32 @@ mod arc_str;
 pub use arc_str::{ArcStr, TArcStr};
 
 use core::fmt;
+use core::mem;
+
+pub type ValueDiscriminant = usize;
 
 #[derive(Debug)]
 pub enum Value {
 	String(ArcStr),
 	Integer(isize),
+}
+
+impl Value {
+	#[inline(always)]
+	pub const fn string_discriminant() -> ValueDiscriminant {
+		const V: Value = Value::Integer(0);
+		V.discriminant()
+	}
+
+	#[inline(always)]
+	pub const fn integer_discriminant() -> ValueDiscriminant {
+		const V: Value = Value::Integer(0);
+		V.discriminant()
+	}
+
+	const fn discriminant(&self) -> ValueDiscriminant {
+		unsafe { mem::transmute::<_, ValueDiscriminant>(mem::discriminant(self)) }
+	}
 }
 
 impl fmt::Display for Value {
@@ -24,6 +45,15 @@ pub enum TValue<'a> {
 	String(TArcStr<'a>),
 	Integer(isize),
 }
+
+const fn _check(v: &Value, t: &TValue) -> u8 {
+	unsafe {
+		(mem::transmute::<_, ValueDiscriminant>(mem::discriminant(v))
+			== mem::transmute::<_, ValueDiscriminant>(mem::discriminant(t))) as u8
+	}
+}
+
+const _CHECK_INT: u8 = _check(&Value::Integer(0), &TValue::Integer(0)) - 1;
 
 impl<'a> From<&'a Value> for TValue<'a> {
 	fn from(v: &'a Value) -> Self {

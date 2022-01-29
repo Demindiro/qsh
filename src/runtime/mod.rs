@@ -46,23 +46,24 @@ impl<'a> fmt::Display for TValue<'a> {
 #[macro_export]
 macro_rules! wrap_ffi {
 	($new_fn:ident = $fn:ident) => {
-		fn $new_fn(argc: usize, argv: *const TValue) {
+		fn $new_fn(argc: usize, argv: *const TValue) -> isize {
 			$fn(unsafe { core::slice::from_raw_parts(argv, argc) })
 		}
 	};
 	(pub $new_fn:ident = $fn:ident) => {
-		pub fn $new_fn(argc: usize, argv: *const TValue) {
+		pub fn $new_fn(argc: usize, argv: *const TValue) -> isize {
 			$fn(unsafe { core::slice::from_raw_parts(argv, argc) })
 		}
 	};
 }
 
-pub fn print(args: &[TValue]) {
+pub fn print(args: &[TValue]) -> isize {
 	for (i, a) in args.iter().enumerate() {
 		print!("{}", a);
 		(i != args.len() - 1).then(|| print!(" "));
 	}
 	println!();
+	0
 }
 
 wrap_ffi!(pub ffi_print = print);

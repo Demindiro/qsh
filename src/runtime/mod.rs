@@ -3,7 +3,6 @@ mod arc_str;
 pub use arc_str::{ArcStr, TArcStr};
 
 use core::fmt;
-use core::slice;
 
 #[derive(Debug)]
 pub enum Value {
@@ -44,10 +43,16 @@ impl<'a> fmt::Display for TValue<'a> {
 	}
 }
 
+#[macro_export]
 macro_rules! wrap_ffi {
+	($new_fn:ident = $fn:ident) => {
+		fn $new_fn(argc: usize, argv: *const TValue) {
+			$fn(unsafe { core::slice::from_raw_parts(argv, argc) })
+		}
+	};
 	(pub $new_fn:ident = $fn:ident) => {
 		pub fn $new_fn(argc: usize, argv: *const TValue) {
-			$fn(unsafe { slice::from_raw_parts(argv, argc) })
+			$fn(unsafe { core::slice::from_raw_parts(argv, argc) })
 		}
 	};
 }

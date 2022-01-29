@@ -113,8 +113,14 @@ where
 				function,
 				arguments,
 			} => {
-				let f = resolve_fn(&*function).expect("todo: function");
+				let (f, push_fn_name) = resolve_fn(&*function)
+					.map(|f| (f, false))
+					.or_else(|| resolve_fn("exec").map(|f| (f, true)))
+					.expect("'exec' not defined");
 				let i = data.len();
+				if push_fn_name {
+					data.push(Value::String((&*function).into()));
+				}
 				for a in arguments.iter() {
 					let v = match a {
 						Argument::String(s) => Value::String((&**s).into()),
@@ -122,14 +128,11 @@ where
 					};
 					data.push(v);
 				}
-				if let Ok(n) = arguments.len().try_into() {
-					// TODO figure out whether push/pop can be fused on modern processors.
-					// If it isn't, we probably shouldn't use it (even though it's shorter)
-					dynasm!(jit ; push BYTE n ; pop rdi);
-				} else if let Ok(n) = arguments.len().try_into() {
+				let len = arguments.len() + push_fn_name.then(|| 1).unwrap_or(0);
+				if let Ok(n) = len.try_into() {
 					dynasm!(jit ; mov edi, DWORD n);
 				} else {
-					dynasm!(jit ; mov rdi, arguments.len().try_into().unwrap())
+					dynasm!(jit ; mov rdi, len.try_into().unwrap())
 				}
 				dynasm!(jit
 					; lea rsi, [>data + (i * 16).try_into().unwrap()]
@@ -166,49 +169,67 @@ mod test {
 	use crate::op::*;
 	use crate::token::*;
 	use core::cell::RefCell;
-	use core::marker::PhantomData;
+	use crate::wrap_ffi;
 
-	// Modern problems require modern solutions
-	struct CaptureFn<'a>(ExecutableBuffer, PhantomData<&'a RefCell<String>>);
+	thread_local! {
+		static OUT: RefCell<String> = RefCell::default();
+	}
 
-	impl<'a> CaptureFn<'a> {
-		fn new(buf: &'a RefCell<String>) -> Self {
-			let mut jit = dynasmrt::x64::Assembler::new().unwrap();
-			dynasm!(jit
-				; mov rdx, QWORD buf as *const _ as _
-				; mov rax, QWORD Self::fmt as _
-				; jmp rax
-			);
-			Self(jit.finalize().unwrap(), PhantomData)
-		}
-
-		// FIXME this is wildly unsafe but I'm not sure how to handle it nicely.
-		//
-		// Wrapping the fn in a struct with a lifetime would be the best option probably.
-		fn callable(&self) -> fn(usize, *const TValue) {
-			unsafe { mem::transmute(self.0.ptr(AssemblyOffset(0))) }
-		}
-
-		extern "C" fn fmt(argc: usize, argv: *const TValue, out: &'a RefCell<String>) {
-			let args = unsafe { core::slice::from_raw_parts(argv, argc) };
+	fn print(args: &[TValue]) {
+		OUT.with(|out| {
 			let mut out = out.borrow_mut();
 			for (i, a) in args.iter().enumerate() {
 				(i > 0).then(|| out.push(' '));
 				out.extend(a.to_string().chars());
 			}
 			out.push('\n');
+		});
+	}
+
+	fn exec(args: &[TValue]) {
+		use std::process::Command;
+		let out = Command::new(args[0].to_string())
+			.args(args[1..].iter().map(|a| a.to_string()))
+			.output()
+			.unwrap();
+		OUT.with(|o| o.borrow_mut().extend(String::from_utf8_lossy(&out.stdout).chars()));
+	}
+
+	wrap_ffi!(ffi_print = print);
+	wrap_ffi!(ffi_exec  = exec );
+
+	fn clear_out() {
+		OUT.with(|out| {
+			out.borrow_mut().clear()
+		})
+	}
+
+	fn resolve_fn(f: &str) -> Option<fn(usize, *const TValue)> {
+		match f {
+			"print" => Some(ffi_print),
+			"exec" => Some(ffi_exec),
+			_ => None,
 		}
 	}
 
 	#[test]
 	fn hello() {
-		let out = RefCell::new(String::new());
-		let print = CaptureFn::new(&out);
-
+		clear_out();
 		let ops = parse(TokenParser::new("print Hello world!").map(Result::unwrap)).unwrap();
-		let f = compile(ops, |f| (f == "print").then(|| print.callable()));
+		let f = compile(ops, resolve_fn);
 		f.call(&[]);
 
-		assert_eq!("Hello world!\n", &*out.borrow());
+		OUT.with(|out| assert_eq!("Hello world!\n", &*out.borrow()));
+	}
+
+	#[test]
+	fn echo() {
+		clear_out();
+
+		let ops = parse(TokenParser::new("echo Hello world!").map(Result::unwrap)).unwrap();
+		let f = compile(ops, resolve_fn);
+		f.call(&[]);
+
+		OUT.with(|out| assert_eq!("Hello world!\n", &*out.borrow()));
 	}
 }

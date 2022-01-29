@@ -25,7 +25,7 @@ pub enum Op {
 	},
 	Return {
 		statement: Argument,
-	}
+	},
 }
 
 #[derive(Debug, PartialEq)]
@@ -76,17 +76,32 @@ fn parse_inner<'a>(
 						t => todo!("parse {:?}", t),
 					}
 				}
-				ops.push(Op::Call { function: f.into(), arguments: args.into() });
+				ops.push(Op::Call {
+					function: f.into(),
+					arguments: args.into(),
+				});
 			}
-			Token::String(s) => if next_is_close {
-				// TODO unescape string
-				ops.push(Op::Return { statement: Argument::String(s.into()) })
+			Token::String(s) => {
+				if next_is_close {
+					// TODO unescape string
+					ops.push(Op::Return {
+						statement: Argument::String(s.into()),
+					})
+				}
 			}
-			Token::Variable(s) => if next_is_close {
-				ops.push(Op::Return { statement: Argument::Variable(s.into()) })
+			Token::Variable(s) => {
+				if next_is_close {
+					ops.push(Op::Return {
+						statement: Argument::Variable(s.into()),
+					})
+				}
 			}
-			Token::Integer(s) => if next_is_close {
-				ops.push(Op::Return { statement: Argument::Integer(s) })
+			Token::Integer(s) => {
+				if next_is_close {
+					ops.push(Op::Return {
+						statement: Argument::Integer(s),
+					})
+				}
 			}
 			t => todo!("parse {:?}", t),
 		}
@@ -110,14 +125,16 @@ mod test {
 	#[test]
 	fn print() {
 		let s = "print Hello world!";
-		assert_eq!(&*parse(TokenParser::new(s).map(Result::unwrap)).unwrap(), [
-			Op::Call {
+		assert_eq!(
+			&*parse(TokenParser::new(s).map(Result::unwrap)).unwrap(),
+			[Op::Call {
 				function: "print".into(),
 				arguments: [
 					Argument::String("Hello".into()),
 					Argument::String("world!".into()),
-				].into(),
-			}
-		]);
+				]
+				.into(),
+			}]
+		);
 	}
 }

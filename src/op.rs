@@ -6,6 +6,7 @@ pub enum Op {
 	Call {
 		function: Box<str>,
 		arguments: Box<[Argument]>,
+		pipe_out: Box<[(Box<str>, Box<str>)]>,
 	},
 	If {
 		condition: Box<[Self]>,
@@ -82,6 +83,7 @@ where
 			Ok([Op::Call {
 				function: f.into(),
 				arguments: args.into(),
+				pipe_out: [].into(),
 			}]
 			.into())
 		}
@@ -127,6 +129,7 @@ fn parse_inner<'a>(
 			Token::Word("while") => todo!("for"),
 			Token::Word(f) => {
 				let mut args = Vec::new();
+				let mut pipe_out = Vec::new();
 				while tokens.peek().map_or(false, |t| t != &Token::Separator) {
 					match tokens.next().unwrap() {
 						Token::ScopeOpen => todo!("scope open"),
@@ -138,12 +141,14 @@ fn parse_inner<'a>(
 						}
 						Token::Variable(v) => args.push(Argument::Variable(v.into())),
 						Token::Integer(i) => args.push(Argument::Integer(i)),
+						Token::PipeOut { from, to } => pipe_out.push((from.into(), to.into())),
 						t => todo!("parse {:?}", t),
 					}
 				}
 				ops.push(Op::Call {
 					function: f.into(),
 					arguments: args.into(),
+					pipe_out: pipe_out.into(),
 				});
 			}
 			Token::String(s) => {
@@ -209,6 +214,7 @@ mod test {
 					Argument::String("world!".into()),
 				]
 				.into(),
+				pipe_out: [].into(),
 			}]
 		);
 	}
@@ -222,10 +228,12 @@ mod test {
 				Op::Call {
 					function: "print".into(),
 					arguments: [Argument::String("Hello".into()),].into(),
+					pipe_out: [].into(),
 				},
 				Op::Call {
 					function: "print".into(),
 					arguments: [Argument::String("world!".into()),].into(),
+					pipe_out: [].into(),
 				}
 			]
 		);
@@ -240,6 +248,7 @@ mod test {
 				condition: [Op::Call {
 					function: "some_cond".into(),
 					arguments: [].into(),
+					pipe_out: [].into(),
 				},]
 				.into(),
 				if_true: [Op::Call {
@@ -250,6 +259,7 @@ mod test {
 						Argument::String("true".into()),
 					]
 					.into(),
+					pipe_out: [].into(),
 				},]
 				.into(),
 				if_false: [].into(),
@@ -281,6 +291,7 @@ mod test {
 						Argument::Variable("b".into()),
 					]
 					.into(),
+					pipe_out: [].into(),
 				},
 			]
 		);

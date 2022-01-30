@@ -17,7 +17,7 @@ pub struct Function {
 impl Function {
 	pub fn call(&self, _args: &[TValue]) {
 		unsafe {
-			let f: fn() = mem::transmute(self.exec.ptr(AssemblyOffset(0)));
+			let f: extern "C" fn() = mem::transmute(self.exec.ptr(AssemblyOffset(0)));
 			f()
 		}
 	}
@@ -89,7 +89,7 @@ impl fmt::Debug for Function {
 /// Compile an opcode tree to native machine-code.
 pub fn compile<F>(ops: Box<[Op]>, resolve_fn: F) -> Function
 where
-	F: Fn(&str) -> Option<fn(usize, *const TValue) -> isize>,
+	F: Fn(&str) -> Option<QFunction>,
 {
 	#[cfg(target_arch = "x86_64")]
 	return compile_x64(ops, resolve_fn);
@@ -100,7 +100,7 @@ where
 #[cfg(target_arch = "x86_64")]
 fn compile_x64<F>(ops: Box<[Op]>, resolve_fn: F) -> Function
 where
-	F: Fn(&str) -> Option<fn(usize, *const TValue) -> isize>,
+	F: Fn(&str) -> Option<QFunction>,
 {
 	let mut jit = X64Compiler::new(resolve_fn);
 	jit.compile(ops);
@@ -110,12 +110,13 @@ where
 #[cfg(target_arch = "x86_64")]
 struct X64Compiler<F>
 where
-	F: Fn(&str) -> Option<fn(usize, *const TValue) -> isize>,
+	F: Fn(&str) -> Option<QFunction>,
 {
 	jit: dynasmrt::x64::Assembler,
 	data: Vec<Value>,
 	resolve_fn: F,
 	variables: BTreeMap<Box<str>, usize>,
+	strings: Vec<u8>,
 	#[cfg(feature = "iced")]
 	symbols: BTreeMap<usize, Box<str>>,
 }
@@ -123,7 +124,7 @@ where
 #[cfg(target_arch = "x86_64")]
 impl<F> X64Compiler<F>
 where
-	F: Fn(&str) -> Option<fn(usize, *const TValue) -> isize>,
+	F: Fn(&str) -> Option<QFunction>,
 {
 	fn new(resolve_fn: F) -> Self {
 		let mut jit = dynasmrt::x64::Assembler::new().unwrap();
@@ -133,6 +134,7 @@ where
 			data: Default::default(),
 			resolve_fn,
 			variables: Default::default(),
+			strings: Default::default(),
 			#[cfg(feature = "iced")]
 			symbols: Default::default(),
 		}
@@ -145,6 +147,8 @@ where
 			l => dynasm!(self.jit ; add rsp, l.try_into().unwrap()),
 		}
 		dynasm!(self.jit ; ret);
+
+		// Add data
 		let data_offset = self.jit.offset();
 		dynasm!(self.jit
 			; .align 8
@@ -160,6 +164,18 @@ where
 			self.jit.push_u64(a);
 			self.jit.push_u64(b);
 		}
+
+		// Add strings
+		let strings_offset = self.jit.offset();
+		dynasm!(self.jit
+			; strings:
+		);
+		#[cfg(feature = "iced")]
+		for i in 0..self.strings.len() {
+			self.symbols
+				.insert(strings_offset.0, format!("strings+{}", i).into());
+		}
+		self.jit.extend(self.strings);
 		Function {
 			exec: self.jit.finalize().unwrap(),
 			data_offset,
@@ -169,23 +185,53 @@ where
 	}
 
 	fn compile(&mut self, ops: Box<[Op]>) {
-		let push_stack = |jit: &mut dynasmrt::x64::Assembler, v: i64| {
-			match v {
-			v if let Ok(v) = v.try_into() => dynasm!(jit ; push BYTE v),
-			v if let Ok(v) = v.try_into() => dynasm!(jit ; push DWORD v),
-			v => dynasm!(jit ; mov rsi, QWORD v; push rsi),
-		}
-		};
 		for op in ops.into_vec() {
 			match op {
 				Op::Call {
 					function,
 					arguments,
+					pipe_out,
 				} => {
+					// Resolve function or default to 'exec'
 					let (f, push_fn_name) = (self.resolve_fn)(&*function)
 						.map(|f| (f, false))
 						.or_else(|| (self.resolve_fn)("exec").map(|f| (f, true)))
 						.expect("'exec' not defined");
+
+					// Reserve space for out values (if they don't exist yet)
+					for (from, to) in pipe_out.iter() {
+						dbg!(&from, &to);
+						self.set_variable((&**to).into(), None);
+					}
+
+					// How much the stack has grown in bytes.
+					// Used for calculating offsets to variables.
+					let mut stack_bytes = 0;
+
+					// Create out list
+					for (from, to) in pipe_out.iter() {
+						let str_offt = self.strings.len();
+						self.strings.push(from.len().try_into().unwrap());
+						self.strings.extend(from.bytes());
+						let offt = self.variables.len() - self.variables[&*to] - 1;
+						let offt = (offt * 16 + stack_bytes).try_into().unwrap();
+						dynasm!(self.jit
+							// value
+							; lea rax, [rsp + offt]
+							; push rax
+							// name
+							; lea rax, [>strings + str_offt.try_into().unwrap()]
+							; push rax
+						);
+						stack_bytes += 16;
+					}
+					dynasm!(self.jit
+						; mov edx, BYTE pipe_out.len().try_into().unwrap()
+						; mov rcx, rsp
+					);
+
+					// Note start of data if all arguments are static. Also push program name
+					// if using 'exec'
 					let i = self.data.len();
 					if push_fn_name {
 						self.data.push(Value::String((&*function).into()));
@@ -196,6 +242,7 @@ where
 						push_fn_name.then(|| "exec".into()).unwrap_or(function),
 					);
 
+					// Figure out whether we need to use the stack.
 					let use_stack = arguments.iter().any(|a| match a {
 						Argument::Variable(_) => true,
 						_ => false,
@@ -204,24 +251,23 @@ where
 
 					if use_stack {
 						// Note that stack pushing is top-down
-						for (i, a) in arguments.iter().rev().enumerate() {
+						for a in arguments.into_vec().into_iter().rev() {
 							let v = match a {
-								Argument::String(s) => Value::String((&**s).into()),
+								Argument::String(s) => Value::String((&*s).into()),
 								Argument::Variable(v) => {
-									let offt = self.variables.len() - self.variables[v] - 1;
-									dbg!(offt, i);
-									let offt = ((offt + i) * 16 + 8).try_into().unwrap();
+									let offt = self.variables.len() - self.variables[&v] - 1;
+									dbg!(offt, stack_bytes);
+									let offt = (offt * 16 + stack_bytes + 8).try_into().unwrap();
 									dynasm!(self.jit
 										; push QWORD [rsp + offt]
 										; push QWORD [rsp + offt]
 									);
+									stack_bytes += 16;
 									continue;
 								}
 								_ => todo!("argument {:?}", a),
 							};
-							let [a, b] = unsafe { mem::transmute_copy::<_, [i64; 2]>(&v) };
-							push_stack(&mut self.jit, b);
-							push_stack(&mut self.jit, a);
+							stack_bytes += self.push_stack_value((&v).into());
 							self.data.push(v);
 						}
 						if let Ok(n) = len.try_into() {
@@ -234,16 +280,13 @@ where
 							; mov rax, QWORD f as _
 							; call rax
 						);
-						let len = len * 16;
-						if let Ok(n) = len.try_into() {
-							dynasm!(self.jit ; add rsp, BYTE n);
-						} else {
-							dynasm!(self.jit ; add rsp, len.try_into().unwrap())
-						}
 					} else {
-						for a in arguments.iter() {
+						// All arguments are constant, so store the argument list in data
+
+						// Push arguments
+						for a in arguments.into_vec() {
 							let v = match a {
-								Argument::String(s) => Value::String((&**s).into()),
+								Argument::String(s) => Value::String((&*s).into()),
 								Argument::Variable(_) => unreachable!(),
 								_ => todo!("argument {:?}", a),
 							};
@@ -254,11 +297,20 @@ where
 						} else {
 							dynasm!(self.jit ; mov rdi, len.try_into().unwrap())
 						}
+				
+						// Call
 						dynasm!(self.jit
 							; lea rsi, [>data + (i * 16).try_into().unwrap()]
 							; mov rax, QWORD f as _
 							; call rax
 						);
+					}
+
+					// Restore stack
+					if let Ok(n) = stack_bytes.try_into() {
+						dynasm!(self.jit ; add rsp, BYTE n);
+					} else {
+						dynasm!(self.jit ; add rsp, stack_bytes.try_into().unwrap())
 					}
 				}
 				Op::If {
@@ -295,25 +347,43 @@ where
 				Op::Assign {
 					variable,
 					statement,
-				} => {
-					let i = self.variables.len();
-					match self.variables.entry(variable) {
-						Entry::Vacant(e) => {
-							let v = match statement {
-								Argument::String(s) => Value::String((&*s).into()),
-								_ => todo!("assign {:?}", statement),
-							};
-							let [a, b] = unsafe { mem::transmute::<_, [i64; 2]>(v) };
-							push_stack(&mut self.jit, b);
-							push_stack(&mut self.jit, a);
-							e.insert(i);
-						}
-						Entry::Occupied(_) => todo!("occupied"),
-					}
-				}
+				} => self.set_variable(variable, Some(statement)),
 				op => todo!("parse {:?}", op),
 			}
 		}
+	}
+
+	fn set_variable(&mut self, variable: Box<str>, statement: Option<Argument>) {
+		let i = self.variables.len();
+		let mut vars = mem::take(&mut self.variables); // Avoid silly borrow errors
+		match vars.entry(variable) {
+			Entry::Vacant(e) => {
+				let v = match statement {
+					Some(Argument::String(s)) => Value::String((&*s).into()),
+					None => Value::Nil,
+					_ => todo!("assign {:?}", statement),
+				};
+				self.push_stack_value((&v).into());
+				self.data.push(v);
+				e.insert(i);
+			}
+			Entry::Occupied(_) => todo!("occupied"),
+		}
+		self.variables = vars;
+	}
+
+	fn push_stack(&mut self, v: i64) -> usize {
+		match v {
+			v if let Ok(v) = v.try_into() => dynasm!(self.jit ; push BYTE v),
+			v if let Ok(v) = v.try_into() => dynasm!(self.jit ; push DWORD v),
+			v => dynasm!(self.jit ; mov rsi, QWORD v; push rsi),
+		}
+		8
+	}
+
+	fn push_stack_value(&mut self, v: TValue) -> usize {
+		let [a, b] = unsafe { mem::transmute::<_, [i64; 2]>(v) };
+		self.push_stack(b) + self.push_stack(a)
 	}
 }
 
@@ -329,10 +399,10 @@ mod test {
 		static OUT: RefCell<String> = RefCell::default();
 	}
 
-	fn print(args: &[TValue]) -> isize {
+	fn print(args: &[TValue], out: &mut [OutValue<'_>]) -> isize {
+		dbg!(args, out);
 		OUT.with(|out| {
 			let mut out = out.borrow_mut();
-			dbg!(args);
 			for (i, a) in args.iter().enumerate() {
 				dbg!(unsafe { mem::transmute_copy::<_, [u64; 2]>(a) });
 				(i > 0).then(|| out.push(' '));
@@ -343,17 +413,23 @@ mod test {
 		0
 	}
 
-	fn exec(args: &[TValue]) -> isize {
+	fn exec(args: &[TValue], out: &mut [OutValue<'_>]) -> isize {
 		use std::process::Command;
-		let out = Command::new(args[0].to_string())
+		let cmd = Command::new(args[0].to_string())
 			.args(args[1..].iter().map(|a| a.to_string()))
 			.output()
 			.unwrap();
 		OUT.with(|o| {
+			for o in out {
+				if o.name() == "1" {
+					o.set_value(Value::String((&*String::from_utf8_lossy(&cmd.stdout)).into()));
+					return;
+				}
+			}
 			o.borrow_mut()
-				.extend(String::from_utf8_lossy(&out.stdout).chars())
+				.extend(String::from_utf8_lossy(&cmd.stdout).chars())
 		});
-		out.status.code().unwrap_or(-1).try_into().unwrap()
+		cmd.status.code().unwrap_or(-1).try_into().unwrap()
 	}
 
 	wrap_ffi!(ffi_print = print);
@@ -363,7 +439,7 @@ mod test {
 		OUT.with(|out| out.borrow_mut().clear())
 	}
 
-	fn resolve_fn(f: &str) -> Option<fn(usize, *const TValue) -> isize> {
+	fn resolve_fn(f: &str) -> Option<QFunction> {
 		match f {
 			"print" => Some(ffi_print),
 			"exec" => Some(ffi_exec),
@@ -409,5 +485,11 @@ mod test {
 	fn variable() {
 		run("@a = 5; @b = \"five\"; print @a is pronounced as @b");
 		OUT.with(|out| assert_eq!("5 is pronounced as five\n", &*out.borrow()));
+	}
+
+	#[test]
+	fn ret_value() {
+		run("echo chickens are neat 1>; print output: @");
+		OUT.with(|out| assert_eq!("output: chickens are neat\n\n", &*out.borrow()));
 	}
 }

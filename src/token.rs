@@ -9,25 +9,15 @@ pub enum Token<'a> {
 	String(&'a str),
 	Variable(&'a str),
 	Integer(isize),
-	Pipe {
-		from: &'a str,
-		to: &'a str,
-	},
 	PipeOut {
 		from: &'a str,
-		to: PipeDestination<'a>,
+		to: &'a str,
 	},
 	PipeIn {
 		to: &'a str,
-		from: PipeDestination<'a>,
+		from: &'a str,
 	},
 	Separator,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum PipeDestination<'a> {
-	Variable(&'a str),
-	Stream(&'a str),
 }
 
 pub struct TokenParser<'a> {
@@ -76,23 +66,14 @@ impl<'a> Iterator for TokenParser<'a> {
 		}
 
 		let f = |t| {
-			fn parse_pipe(p: &str) -> PipeDestination {
-				match p {
-					p if p.starts_with("@") => PipeDestination::Variable(&p[1..]),
-					p => PipeDestination::Stream(p),
-				}
-			}
 			match t {
 				Token::Word(s) if s == "" => None,
 				Token::Separator if self.last_was_separator => None,
-				Token::Word(s) if let Some((from, to)) = s.split_once('|') => {
-					Some(Token::Pipe { from, to })
-				}
 				Token::Word(s) if let Some((from, to)) = s.split_once('>') => {
-					Some(Token::PipeOut { from, to: parse_pipe(to) })
+					Some(Token::PipeOut { from, to })
 				}
-				Token::Word(s) if let Some((from, to)) = s.split_once('<') => {
-					Some(Token::PipeIn { to, from: parse_pipe(from) })
+				Token::Word(s) if let Some((to, from)) = s.split_once('<') => {
+					Some(Token::PipeIn { to, from })
 				}
 				Token::Word(s) if s.chars().next() == Some('@') => Some(Token::Variable(&s[1..])),
 				t => Some(t),
@@ -182,9 +163,8 @@ print quack
 
 @a = $5; print @a
 
-ls 1>@ls
-
-ls 2>@error 1| sort -h
+ls 2>error 1>
+sort -h 0<
 
 if @error == ping
 	print \"p  o  n  g\"
@@ -214,18 +194,20 @@ if @error != \"\"
 			Token::Separator,
 			Token::Word("ls"),
 			Token::PipeOut {
+				from: "2",
+				to: "error",
+			},
+			Token::PipeOut {
 				from: "1",
-				to: PipeDestination::Variable("ls"),
+				to: "",
 			},
 			Token::Separator,
-			Token::Word("ls"),
-			Token::PipeOut {
-				from: "2",
-				to: PipeDestination::Variable("error"),
-			},
-			Token::Pipe { from: "1", to: "" },
 			Token::Word("sort"),
 			Token::Word("-h"),
+			Token::PipeIn {
+				from: "",
+				to: "0",
+			},
 			Token::Separator,
 			Token::Word("if"),
 			Token::Variable("error"),

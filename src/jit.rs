@@ -12,6 +12,8 @@ pub struct Function {
 	data_offset: AssemblyOffset,
 	#[cfg(feature = "iced")]
 	symbols: Rc<BTreeMap<usize, Box<str>>>,
+	#[cfg(feature = "iced")]
+	comments: BTreeMap<usize, String>,
 }
 
 impl Function {
@@ -80,7 +82,11 @@ impl fmt::Debug for Function {
 				write!(f, "{:02x}", b)?;
 			}
 			(instr.len()..15).try_for_each(|_| f.write_str("  "))?;
-			writeln!(f, "  {}", s)?;
+			if let Some(c) = self.comments.get(&instr.ip().try_into().unwrap()) {
+				writeln!(f, "  {:<32}  ; {}", s, c)?;
+			} else {
+				writeln!(f, "  {}", s)?;
+			}
 		}
 		Ok(())
 	}
@@ -119,6 +125,8 @@ where
 	strings: Vec<u8>,
 	#[cfg(feature = "iced")]
 	symbols: BTreeMap<usize, Box<str>>,
+	#[cfg(feature = "iced")]
+	comments: BTreeMap<usize, String>,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -127,21 +135,22 @@ where
 	F: Fn(&str) -> Option<QFunction>,
 {
 	fn new(resolve_fn: F) -> Self {
-		let mut jit = dynasmrt::x64::Assembler::new().unwrap();
-		dynasm!(jit ; push rdi);
 		Self {
-			jit,
+			jit: dynasmrt::x64::Assembler::new().unwrap(),
 			data: Default::default(),
 			resolve_fn,
 			variables: Default::default(),
 			strings: Default::default(),
 			#[cfg(feature = "iced")]
 			symbols: Default::default(),
+			#[cfg(feature = "iced")]
+			comments: Default::default(),
 		}
 	}
 
 	fn finish(mut self) -> Function {
-		match self.variables.len() * 16 + 8 {
+		self.comment("return");
+		match self.variables.len() * 16 {
 			8 => dynasm!(self.jit ; pop rdi),
 			l if let Ok(l) = l.try_into() => dynasm!(self.jit ; add rsp, BYTE l),
 			l => dynasm!(self.jit ; add rsp, l.try_into().unwrap()),
@@ -155,9 +164,9 @@ where
 			; data:
 		);
 		#[cfg(feature = "iced")]
-		for i in 0..self.data.len() {
+		for i in 0..self.data.len() * 16 {
 			self.symbols
-				.insert(data_offset.0, format!("data+{}", i * 16).into());
+				.insert(data_offset.0 + i, format!("data+{}", i).into());
 		}
 		for d in self.data {
 			let [a, b] = unsafe { mem::transmute::<_, [u64; 2]>(d) };
@@ -173,7 +182,7 @@ where
 		#[cfg(feature = "iced")]
 		for i in 0..self.strings.len() {
 			self.symbols
-				.insert(strings_offset.0, format!("strings+{}", i).into());
+				.insert(strings_offset.0 + i, format!("strings+{}", i).into());
 		}
 		self.jit.extend(self.strings);
 		Function {
@@ -181,6 +190,8 @@ where
 			data_offset,
 			#[cfg(feature = "iced")]
 			symbols: Rc::new(self.symbols),
+			#[cfg(feature = "iced")]
+			comments: self.comments,
 		}
 	}
 
@@ -191,7 +202,9 @@ where
 					function,
 					arguments,
 					pipe_out,
+					pipe_in,
 				} => {
+					self.comment("call ".to_string() + &function);
 					// Resolve function or default to 'exec'
 					let (f, push_fn_name) = (self.resolve_fn)(&*function)
 						.map(|f| (f, false))
@@ -209,14 +222,17 @@ where
 					let mut stack_bytes = 0;
 
 					// Create out list
-					for (from, to) in pipe_out.iter() {
+					self.comment("out pipes");
+					let len = pipe_out.len().try_into().unwrap();
+					for (from, to) in pipe_out.into_vec() {
+						self.comment(format!("{} > @{}", from, to));
 						let str_offt = self.strings.len();
 						self.strings.push(from.len().try_into().unwrap());
 						self.strings.extend(from.bytes());
 						let offt = self.variables.len() - self.variables[&*to] - 1;
 						let offt = (offt * 16 + stack_bytes).try_into().unwrap();
 						dynasm!(self.jit
-							// value
+							// value pointer
 							; lea rax, [rsp + offt]
 							; push rax
 							// name
@@ -226,8 +242,34 @@ where
 						stack_bytes += 16;
 					}
 					dynasm!(self.jit
-						; mov edx, BYTE pipe_out.len().try_into().unwrap()
+						; mov edx, BYTE len
 						; mov rcx, rsp
+					);
+
+					// Create in list
+					self.comment("in pipes");
+					let len = pipe_in.len().try_into().unwrap();
+					for (from, to) in pipe_in.into_vec() {
+						self.comment(format!("{} < @{}", to, from));
+						let str_offt = self.strings.len();
+						self.strings.push(to.len().try_into().unwrap());
+						self.strings.extend(to.bytes());
+						let offt = self.variables.len() - self.variables[&*from] - 1;
+						let offt = (offt * 16 + stack_bytes + 8).try_into().unwrap();
+						dynasm!(self.jit
+							// value
+							; push QWORD [rsp + offt]
+							// value discriminant
+							; push QWORD [rsp + offt]
+							// name
+							; lea rax, [>strings + str_offt.try_into().unwrap()]
+							; push rax
+						);
+						stack_bytes += 24;
+					}
+					dynasm!(self.jit
+						; mov r8, len
+						; mov r9, rsp
 					);
 
 					// Note start of data if all arguments are static. Also push program name
@@ -249,7 +291,10 @@ where
 					});
 					let len = arguments.len() + push_fn_name.then(|| 1).unwrap_or(0);
 
+					// Create argument list
 					if use_stack {
+						self.comment("dynamic args");
+
 						// Note that stack pushing is top-down
 						for a in arguments.into_vec().into_iter().rev() {
 							let v = match a {
@@ -277,11 +322,9 @@ where
 						}
 						dynasm!(self.jit
 							; mov rsi, rsp
-							; mov rax, QWORD f as _
-							; call rax
 						);
 					} else {
-						// All arguments are constant, so store the argument list in data
+						self.comment("constant args");
 
 						// Push arguments
 						for a in arguments.into_vec() {
@@ -297,14 +340,22 @@ where
 						} else {
 							dynasm!(self.jit ; mov rdi, len.try_into().unwrap())
 						}
-				
-						// Call
+
 						dynasm!(self.jit
 							; lea rsi, [>data + (i * 16).try_into().unwrap()]
-							; mov rax, QWORD f as _
-							; call rax
 						);
 					}
+
+					// Align stack to 16 bytes, then call
+					// Note that we didn't align the stack at the start of the function,
+					// so offset by 8
+					self.comment("call");
+					(stack_bytes % 16 != 8).then(|| dynasm!(self.jit ; push rbx));
+					dynasm!(self.jit
+						; mov rax, QWORD f as _
+						; call rax
+					);
+					(stack_bytes % 16 != 8).then(|| dynasm!(self.jit ; pop rbx));
 
 					// Restore stack
 					if let Ok(n) = stack_bytes.try_into() {
@@ -347,7 +398,10 @@ where
 				Op::Assign {
 					variable,
 					statement,
-				} => self.set_variable(variable, Some(statement)),
+				} => {
+					self.comment(format!("@{} = {:?}", variable, statement));
+					self.set_variable(variable, Some(statement))
+				}
 				op => todo!("parse {:?}", op),
 			}
 		}
@@ -385,6 +439,18 @@ where
 		let [a, b] = unsafe { mem::transmute::<_, [i64; 2]>(v) };
 		self.push_stack(b) + self.push_stack(a)
 	}
+
+	fn comment(&mut self, comment: impl AsRef<str> + Into<String>) {
+		let _c = comment.as_ref();
+		#[cfg(feature = "iced")]
+		self.comments
+			.entry(self.jit.offset().0)
+			.and_modify(|s| {
+				*s += ", ";
+				*s += _c;
+			})
+			.or_insert_with(|| comment.into());
+	}
 }
 
 #[cfg(test)]
@@ -399,8 +465,7 @@ mod test {
 		static OUT: RefCell<String> = RefCell::default();
 	}
 
-	fn print(args: &[TValue], out: &mut [OutValue<'_>]) -> isize {
-		dbg!(args, out);
+	fn print(args: &[TValue], out: &mut [OutValue<'_>], inv: &[InValue<'_>]) -> isize {
 		OUT.with(|out| {
 			let mut out = out.borrow_mut();
 			for (i, a) in args.iter().enumerate() {
@@ -413,23 +478,46 @@ mod test {
 		0
 	}
 
-	fn exec(args: &[TValue], out: &mut [OutValue<'_>]) -> isize {
-		use std::process::Command;
-		let cmd = Command::new(args[0].to_string())
+	fn exec(args: &[TValue], out: &mut [OutValue<'_>], inv: &[InValue<'_>]) -> isize {
+		use std::io::{Read, Write};
+		use std::process::{Command, Stdio};
+
+		let mut stdin = Stdio::null();
+		let mut val = None;
+		for i in inv {
+			if i.name() == "0" {
+				stdin = Stdio::piped();
+				val = Some(i.value());
+				break;
+			}
+		}
+		let mut cmd = Command::new(args[0].to_string())
 			.args(args[1..].iter().map(|a| a.to_string()))
-			.output()
+			.stdout(Stdio::piped())
+			.stdin(stdin)
+			.spawn()
 			.unwrap();
+		val.map(|val| {
+			cmd.stdin
+				.take()
+				.unwrap()
+				.write_all(val.to_string().as_bytes())
+				.unwrap()
+		});
+		let code = cmd.wait().unwrap().code().unwrap_or(-1).try_into().unwrap();
+		let stdout = cmd.stdout.unwrap();
+		let stdout = stdout.bytes().map(Result::unwrap).collect::<Vec<_>>();
+		let stdout = String::from_utf8_lossy(&stdout);
 		OUT.with(|o| {
 			for o in out {
 				if o.name() == "1" {
-					o.set_value(Value::String((&*String::from_utf8_lossy(&cmd.stdout)).into()));
+					o.set_value(Value::String((&*stdout).into()));
 					return;
 				}
 			}
-			o.borrow_mut()
-				.extend(String::from_utf8_lossy(&cmd.stdout).chars())
+			o.borrow_mut().extend(stdout.chars())
 		});
-		cmd.status.code().unwrap_or(-1).try_into().unwrap()
+		code
 	}
 
 	wrap_ffi!(ffi_print = print);
@@ -491,5 +579,11 @@ mod test {
 	fn ret_value() {
 		run("echo chickens are neat 1>; print output: @");
 		OUT.with(|out| assert_eq!("output: chickens are neat\n\n", &*out.borrow()));
+	}
+
+	#[test]
+	fn cat() {
+		run("echo chickens are neat 1>; cat 0<");
+		OUT.with(|out| assert_eq!("chickens are neat\n", &*out.borrow()));
 	}
 }

@@ -5,13 +5,20 @@ pub use arc_str::{ArcStr, TArcStr};
 use core::fmt;
 use core::mem;
 use core::ptr::NonNull;
-use core::str;
 use core::slice;
+use core::str;
 
 pub type ValueDiscriminant = usize;
-pub type QFunction = for<'a> extern "C" fn(usize, *const TValue, usize, *mut OutValue<'a>) -> isize;
+pub type QFunction = for<'a> extern "C" fn(
+	usize,
+	*const TValue,
+	usize,
+	*mut OutValue<'a>,
+	usize,
+	*const InValue<'a>,
+) -> isize;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Value {
 	Nil,
 	String(ArcStr),
@@ -46,7 +53,7 @@ impl fmt::Display for Value {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum TValue<'a> {
 	Nil,
 	String(TArcStr<'a>),
@@ -114,6 +121,37 @@ impl fmt::Debug for OutValue<'_> {
 	}
 }
 
+#[repr(C)]
+pub struct InValue<'a> {
+	name: NonNull<u8>,
+	value: TValue<'a>,
+}
+
+impl<'a> InValue<'a> {
+	#[inline(always)]
+	pub fn name(&self) -> &str {
+		unsafe {
+			let s = *self.name.as_ref();
+			let s = slice::from_raw_parts(self.name.as_ptr().add(1), s.into());
+			str::from_utf8_unchecked(s)
+		}
+	}
+
+	#[inline(always)]
+	pub fn value(&self) -> TValue<'a> {
+		self.value
+	}
+}
+
+impl fmt::Debug for InValue<'_> {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		f.debug_struct(stringify!(InValue))
+			.field("name", &self.name())
+			.field("value", &self.value)
+			.finish()
+	}
+}
+
 #[macro_export]
 macro_rules! wrap_ffi {
 	($new_fn:ident = $fn:ident) => {
@@ -123,18 +161,19 @@ macro_rules! wrap_ffi {
 		wrap_ffi!(@INTERNAL [pub] $new_fn = $fn);
 	};
 	(@INTERNAL [$($vis:ident)*] $new_fn:ident = $fn:ident) => {
-		$($vis)* extern "C" fn $new_fn(argc: usize, argv: *const TValue, outc: usize, outv: *mut OutValue<'_>) -> isize {
+		$($vis)* extern "C" fn $new_fn(argc: usize, argv: *const TValue, outc: usize, outv: *mut OutValue<'_>, inc: usize, inv: *const InValue<'_>) -> isize {
 			unsafe {
-				use core::slice;
+				use core::slice::{from_raw_parts, from_raw_parts_mut};
 				debug_assert!(!argv.is_null());
 				debug_assert!(!outv.is_null());
-				$fn(slice::from_raw_parts(argv, argc), slice::from_raw_parts_mut(outv, outc))
+				debug_assert!(!inv.is_null());
+				$fn(from_raw_parts(argv, argc), from_raw_parts_mut(outv, outc), from_raw_parts(inv, inc))
 			}
 		}
 	};
 }
 
-pub fn print(args: &[TValue], _: &mut [OutValue<'_>]) -> isize {
+pub fn print(args: &[TValue], _: &mut [OutValue<'_>], _: &[InValue<'_>]) -> isize {
 	for (i, a) in args.iter().enumerate() {
 		print!("{}", a);
 		(i != args.len() - 1).then(|| print!(" "));

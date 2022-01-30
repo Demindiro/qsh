@@ -9,14 +9,8 @@ pub enum Token<'a> {
 	String(&'a str),
 	Variable(&'a str),
 	Integer(isize),
-	PipeOut {
-		from: &'a str,
-		to: &'a str,
-	},
-	PipeIn {
-		to: &'a str,
-		from: &'a str,
-	},
+	PipeOut { from: &'a str, to: &'a str },
+	PipeIn { to: &'a str, from: &'a str },
 	Separator,
 }
 
@@ -197,17 +191,11 @@ if @error != \"\"
 				from: "2",
 				to: "error",
 			},
-			Token::PipeOut {
-				from: "1",
-				to: "",
-			},
+			Token::PipeOut { from: "1", to: "" },
 			Token::Separator,
 			Token::Word("sort"),
 			Token::Word("-h"),
-			Token::PipeIn {
-				from: "",
-				to: "0",
-			},
+			Token::PipeIn { from: "", to: "0" },
 			Token::Separator,
 			Token::Word("if"),
 			Token::Variable("error"),

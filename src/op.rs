@@ -7,6 +7,7 @@ pub enum Op {
 		function: Box<str>,
 		arguments: Box<[Argument]>,
 		pipe_out: Box<[(Box<str>, Box<str>)]>,
+		pipe_in: Box<[(Box<str>, Box<str>)]>,
 	},
 	If {
 		condition: Box<[Self]>,
@@ -84,6 +85,7 @@ where
 				function: f.into(),
 				arguments: args.into(),
 				pipe_out: [].into(),
+				pipe_in: [].into(),
 			}]
 			.into())
 		}
@@ -130,6 +132,7 @@ fn parse_inner<'a>(
 			Token::Word(f) => {
 				let mut args = Vec::new();
 				let mut pipe_out = Vec::new();
+				let mut pipe_in = Vec::new();
 				while tokens.peek().map_or(false, |t| t != &Token::Separator) {
 					match tokens.next().unwrap() {
 						Token::ScopeOpen => todo!("scope open"),
@@ -142,6 +145,7 @@ fn parse_inner<'a>(
 						Token::Variable(v) => args.push(Argument::Variable(v.into())),
 						Token::Integer(i) => args.push(Argument::Integer(i)),
 						Token::PipeOut { from, to } => pipe_out.push((from.into(), to.into())),
+						Token::PipeIn { from, to } => pipe_in.push((from.into(), to.into())),
 						t => todo!("parse {:?}", t),
 					}
 				}
@@ -149,6 +153,7 @@ fn parse_inner<'a>(
 					function: f.into(),
 					arguments: args.into(),
 					pipe_out: pipe_out.into(),
+					pipe_in: pipe_in.into(),
 				});
 			}
 			Token::String(s) => {
@@ -215,6 +220,7 @@ mod test {
 				]
 				.into(),
 				pipe_out: [].into(),
+				pipe_in: [].into(),
 			}]
 		);
 	}
@@ -229,11 +235,13 @@ mod test {
 					function: "print".into(),
 					arguments: [Argument::String("Hello".into()),].into(),
 					pipe_out: [].into(),
+					pipe_in: [].into(),
 				},
 				Op::Call {
 					function: "print".into(),
 					arguments: [Argument::String("world!".into()),].into(),
 					pipe_out: [].into(),
+					pipe_in: [].into(),
 				}
 			]
 		);
@@ -249,6 +257,7 @@ mod test {
 					function: "some_cond".into(),
 					arguments: [].into(),
 					pipe_out: [].into(),
+					pipe_in: [].into(),
 				},]
 				.into(),
 				if_true: [Op::Call {
@@ -260,6 +269,7 @@ mod test {
 					]
 					.into(),
 					pipe_out: [].into(),
+					pipe_in: [].into(),
 				},]
 				.into(),
 				if_false: [].into(),
@@ -292,6 +302,7 @@ mod test {
 					]
 					.into(),
 					pipe_out: [].into(),
+					pipe_in: [].into(),
 				},
 			]
 		);

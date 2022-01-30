@@ -76,6 +76,14 @@ impl<'a> Iterator for TokenParser<'a> {
 
 		while let Some((i, c)) = self.iter.next() {
 			let t = match c {
+				'#' => {
+					while let Some((_, c)) = self.iter.next() {
+						if c == '\n' {
+							break;
+						}
+					}
+					f(Token::Separator)
+				}
 				';' | '\n' => {
 					let a = f(Token::Word(&self.s[self.start..i]));
 					let b = f(Token::Separator);
@@ -148,6 +156,11 @@ impl<'a> Iterator for TokenParser<'a> {
 mod test {
 	use super::*;
 
+	fn cmp(s: &str, t: &[Token]) {
+		let s = TokenParser::new(s).map(Result::unwrap).collect::<Vec<_>>();
+		assert_eq!(&s, t);
+	}
+
 	#[test]
 	fn test() {
 		let s = "
@@ -215,9 +228,21 @@ if @error != \"\"
 			Token::Variable("error"),
 			Token::Separator,
 		];
-		assert_eq!(
-			TokenParser::new(s).map(Result::unwrap).collect::<Vec<_>>(),
-			&t
-		);
+		cmp(s, &t);
+	}
+
+	#[test]
+	fn comment() {
+		let s = "
+# Ignore me; print oh no
+
+print \"Don't ignore me!\" # Do ignore this though
+";
+		let t = [
+			Token::Word("print"),
+			Token::String("Don't ignore me!"),
+			Token::Separator,
+		];
+		cmp(s, &t);
 	}
 }

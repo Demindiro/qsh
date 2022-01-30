@@ -182,4 +182,40 @@ pub fn print(args: &[TValue], _: &mut [OutValue<'_>], _: &[InValue<'_>]) -> isiz
 	0
 }
 
+pub fn exec(args: &[TValue], out: &mut [OutValue<'_>], inv: &[InValue<'_>]) -> isize {
+	use std::io::{Read, Write};
+	use std::process::{Command, Stdio};
+
+	// Figure out I/O redirection
+	let mut stdin = Stdio::inherit();
+	let mut stdout = Stdio::inherit();
+	let mut stderr = Stdio::inherit();
+	let mut val = None;
+	for i in inv {
+		if i.name() == "0" {
+			stdin = Stdio::piped();
+			val = Some(i.value());
+			break;
+		}
+	}
+	for o in out {
+		match o.name() {
+			"1" => stdout = Stdio::piped(),
+			"2" => stderr = Stdio::piped(),
+			_ => (),
+		}
+	}
+
+	let mut cmd = Command::new(args[0].to_string())
+		.args(args[1..].iter().map(|a| a.to_string()))
+		.stdin(stdin)
+		.stdout(stdout)
+		.stderr(stderr)
+		.spawn()
+		.unwrap();
+	let code = cmd.wait().unwrap().code().unwrap_or(-1);
+	code.try_into().unwrap()
+}
+
 wrap_ffi!(pub ffi_print = print);
+wrap_ffi!(pub ffi_exec  = exec );

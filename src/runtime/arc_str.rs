@@ -8,8 +8,8 @@ use std::alloc::{alloc, dealloc};
 
 #[repr(C)]
 struct ArcStrInner {
-	size: usize,
 	refcount: AtomicUsize,
+	size: usize,
 	buffer: [u8; 0],
 }
 

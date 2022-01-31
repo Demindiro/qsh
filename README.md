@@ -66,3 +66,29 @@ print $xff    # Prints 255
 
 All functions return an integer status code. Other return values can be
 extracted using pipes.
+
+
+### Streams
+
+The main mechanism for exchanging data with programs are streams: data is
+continuously written and read from a stream.
+
+Estabilishing a stream from one program to another is done through pipes.
+Each pipe has exactly one input and one output, i.e.:
+
+```qsh
+# This is fine
+read a.txt 1>
+write b.txt 1<
+
+# The stream from `read a.txt` is lost
+read a.txt 1>
+read b.txt 1>
+
+# `write b.txt` will not write any data since `write a.txt` wrote all of it
+write a.txt 1<
+write b.txt 1<
+```
+
+A newly created pipe always has its input attached. If the input becomes
+disconnected, the pipe becomes unusable.

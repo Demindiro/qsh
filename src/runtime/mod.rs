@@ -1,6 +1,8 @@
 mod arc_str;
+mod pipe;
 
 pub use arc_str::{ArcStr, TArcStr};
+pub use pipe::{Pipe, TPipe};
 
 use core::fmt;
 use core::mem;
@@ -23,6 +25,7 @@ pub enum Value {
 	Nil,
 	String(ArcStr),
 	Integer(isize),
+	Pipe(Pipe),
 }
 
 impl Value {
@@ -49,6 +52,7 @@ impl fmt::Display for Value {
 			Self::Nil => f.write_str("(nil)"),
 			Self::String(s) => s.fmt(f),
 			Self::Integer(s) => s.fmt(f),
+			Self::Pipe(_) => f.write_str("<pipe>"),
 		}
 	}
 }
@@ -58,6 +62,7 @@ pub enum TValue<'a> {
 	Nil,
 	String(TArcStr<'a>),
 	Integer(isize),
+	Pipe(TPipe<'a>),
 }
 
 const fn _check(v: &Value, t: &TValue) -> u8 {
@@ -76,6 +81,7 @@ impl<'a> From<&'a Value> for TValue<'a> {
 			Value::Nil => Self::Nil,
 			Value::String(s) => Self::String(s.into()),
 			Value::Integer(s) => Self::Integer(*s),
+			Value::Pipe(s) => Self::Pipe(s.into()),
 		}
 	}
 }
@@ -86,6 +92,7 @@ impl<'a> fmt::Display for TValue<'a> {
 			Self::Nil => f.write_str("(nil)"),
 			Self::String(s) => s.fmt(f),
 			Self::Integer(s) => s.fmt(f),
+			Self::Pipe(_) => f.write_str("<pipe>"),
 		}
 	}
 }

@@ -2,9 +2,14 @@
 
 find . -name *.rs >
 
+if @?; print "success (find)"
+
 print Rust source files:
 print @
 
 grep < runtime >
+
+if @?; print "success (grep)"
+
 print Runtime source files:
 print @

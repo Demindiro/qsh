@@ -93,10 +93,13 @@ where
 			statement: Argument::String(s.into()),
 		}]
 		.into()),
-		Token::Variable(s) => Ok([Op::Return {
-			statement: Argument::Variable(s.into()),
-		}]
-		.into()),
+		Token::Variable(s) => {
+			assert_eq!(tokens.next(), Some(Token::Separator));
+			Ok([Op::Return {
+				statement: Argument::Variable(s.into()),
+			}]
+			.into())
+		}
 		Token::Integer(s) => Ok([Op::Return {
 			statement: Argument::Integer(s),
 		}]

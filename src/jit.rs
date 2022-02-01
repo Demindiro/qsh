@@ -123,6 +123,7 @@ where
 	resolve_fn: F,
 	variables: BTreeMap<Box<str>, usize>,
 	strings: Vec<u8>,
+	retval_defined: bool,
 	#[cfg(feature = "iced")]
 	symbols: BTreeMap<usize, Box<str>>,
 	#[cfg(feature = "iced")]
@@ -141,6 +142,7 @@ where
 			resolve_fn,
 			variables: Default::default(),
 			strings: Default::default(),
+			retval_defined: Default::default(),
 			#[cfg(feature = "iced")]
 			symbols: Default::default(),
 			#[cfg(feature = "iced")]
@@ -363,13 +365,20 @@ where
 					} else {
 						dynasm!(self.jit ; add rsp, stack_bytes.try_into().unwrap())
 					}
+
+					// @? is now useable
+					self.retval_defined = true;
 				}
 				Op::If {
 					condition,
 					if_true,
 					if_false,
 				} => {
-					self.compile(condition);
+					self.comment("if");
+					assert!(self.retval_defined);
+					if &*condition != &[Op::Return { statement: Argument::Variable("?".into()) }] {
+						self.compile(condition);
+					}
 					dynasm!(self.jit
 						; test rax, rax
 						// FIXME 1-byte jumps may not always be possible.
@@ -384,6 +393,8 @@ where
 							; if_false:
 						);
 						self.compile(if_false);
+						#[cfg(feature = "iced")]
+						self.symbols.insert(self.jit.offset().0, "if_true".into());
 						dynasm!(self.jit
 							; if_true:
 						);

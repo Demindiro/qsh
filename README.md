@@ -97,3 +97,11 @@ write b.txt 1<
 
 A newly created pipe always has its input attached. If the input becomes
 disconnected, the pipe becomes unusable.
+
+
+### Special variables
+
+To keep scripts short, some variables automatically get a value assigned.
+These variables cannot be assigned to directly.
+
+- `@?`: the return value of a call.

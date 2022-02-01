@@ -1,4 +1,4 @@
-use crate::op::{Argument, Op};
+use crate::op::{Expression, Op};
 use crate::runtime::*;
 use core::fmt;
 use core::mem;
@@ -288,7 +288,7 @@ where
 
 					// Figure out whether we need to use the stack.
 					let use_stack = arguments.iter().any(|a| match a {
-						Argument::Variable(_) => true,
+						Expression::Variable(_) => true,
 						_ => false,
 					});
 					let len = arguments.len() + push_fn_name.then(|| 1).unwrap_or(0);
@@ -300,8 +300,8 @@ where
 						// Note that stack pushing is top-down
 						for a in arguments.into_vec().into_iter().rev() {
 							let v = match a {
-								Argument::String(s) => Value::String((&*s).into()),
-								Argument::Variable(v) => {
+								Expression::String(s) => Value::String((&*s).into()),
+								Expression::Variable(v) => {
 									let offt = self.variables.len() - self.variables[&v] - 1;
 									dbg!(offt, stack_bytes);
 									let offt = (offt * 16 + stack_bytes + 8).try_into().unwrap();
@@ -331,8 +331,8 @@ where
 						// Push arguments
 						for a in arguments.into_vec() {
 							let v = match a {
-								Argument::String(s) => Value::String((&*s).into()),
-								Argument::Variable(_) => unreachable!(),
+								Expression::String(s) => Value::String((&*s).into()),
+								Expression::Variable(_) => unreachable!(),
 								_ => todo!("argument {:?}", a),
 							};
 							self.data.push(v);
@@ -374,10 +374,14 @@ where
 					if_true,
 					if_false,
 				} => {
-					self.comment("if");
 					assert!(self.retval_defined);
-					if &*condition != &[Op::Return { statement: Argument::Variable("?".into()) }] {
-						self.compile(condition);
+					match condition {
+						Expression::Variable(s) if &*s == "?" => self.comment("if @?"),
+						Expression::Statement(c) => {
+							self.comment("if <statement>");
+							self.compile(c)
+						}
+						c => todo!("condition {:?}", c),
 					}
 					dynasm!(self.jit
 						; test rax, rax
@@ -408,32 +412,32 @@ where
 				}
 				Op::Assign {
 					variable,
-					statement,
+					expression,
 				} => {
-					self.comment(format!("@{} = {:?}", variable, statement));
-					self.set_variable(variable, Some(statement))
+					self.comment(format!("@{} = {:?}", variable, expression));
+					self.set_variable(variable, Some(expression))
 				}
 				op => todo!("parse {:?}", op),
 			}
 		}
 	}
 
-	fn set_variable(&mut self, variable: Box<str>, statement: Option<Argument>) {
+	fn set_variable(&mut self, variable: Box<str>, expression: Option<Expression>) {
 		let i = self.variables.len();
 		let mut vars = mem::take(&mut self.variables); // Avoid silly borrow errors
 		match vars.entry(variable) {
 			Entry::Vacant(e) => {
-				let v = match statement {
-					Some(Argument::String(s)) => Value::String((&*s).into()),
+				let v = match expression {
+					Some(Expression::String(s)) => Value::String((&*s).into()),
 					None => Value::Nil,
-					_ => todo!("assign {:?}", statement),
+					_ => todo!("assign {:?}", expression),
 				};
 				self.push_stack_value((&v).into());
 				self.data.push(v);
 				e.insert(i);
 			}
 			Entry::Occupied(e) => {
-				statement.is_some().then(|| todo!("set occupied"));
+				expression.is_some().then(|| todo!("set occupied"));
 			}
 		}
 		self.variables = vars;

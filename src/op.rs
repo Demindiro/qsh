@@ -5,12 +5,12 @@ use core::iter::Peekable;
 pub enum Op {
 	Call {
 		function: Box<str>,
-		arguments: Box<[Argument]>,
+		arguments: Box<[Expression]>,
 		pipe_out: Box<[(Box<str>, Box<str>)]>,
 		pipe_in: Box<[(Box<str>, Box<str>)]>,
 	},
 	If {
-		condition: Box<[Self]>,
+		condition: Expression,
 		if_true: Box<[Self]>,
 		if_false: Box<[Self]>,
 	},
@@ -23,15 +23,12 @@ pub enum Op {
 	},
 	Assign {
 		variable: Box<str>,
-		statement: Argument,
-	},
-	Return {
-		statement: Argument,
+		expression: Expression,
 	},
 }
 
 #[derive(Debug, PartialEq)]
-pub enum Argument {
+pub enum Expression {
 	String(Box<str>),
 	Variable(Box<str>),
 	Integer(isize),
@@ -46,26 +43,26 @@ pub fn parse<'a>(mut tokens: impl Iterator<Item = Token<'a>>) -> Result<Box<[Op]
 }
 
 /// Parse an argument, i.e. `print <arg> <arg> ...`
-fn parse_arg<'a, I>(tokens: &mut Peekable<I>) -> Result<Argument, ParseError>
+fn parse_arg<'a, I>(tokens: &mut Peekable<I>) -> Result<Expression, ParseError>
 where
 	I: Iterator<Item = Token<'a>>,
 {
 	match tokens.next().unwrap() {
 		Token::ScopeOpen => todo!("scope open"),
 		Token::ScopeClose => todo!("scope close"),
-		Token::Word(s) => Ok(Argument::String(s.into())),
+		Token::Word(s) => Ok(Expression::String(s.into())),
 		Token::String(s) => {
 			// TODO unescape
-			Ok(Argument::String(s.into()))
+			Ok(Expression::String(s.into()))
 		}
-		Token::Variable(v) => Ok(Argument::Variable(v.into())),
-		Token::Integer(i) => Ok(Argument::Integer(i)),
+		Token::Variable(v) => Ok(Expression::Variable(v.into())),
+		Token::Integer(i) => Ok(Expression::Integer(i)),
 		t => todo!("parse {:?}", t),
 	}
 }
 
 /// Parse an "expression", i.e. `if <expr>`, `for v in <expr>`, ..
-fn parse_expr<'a, I>(tokens: &mut Peekable<I>) -> Result<Box<[Op]>, ParseError>
+fn parse_expr<'a, I>(tokens: &mut Peekable<I>) -> Result<Expression, ParseError>
 where
 	I: Iterator<Item = Token<'a>>,
 {
@@ -81,29 +78,20 @@ where
 				}
 				args.push(parse_arg(tokens)?);
 			}
-			Ok([Op::Call {
+			Ok(Expression::Statement([Op::Call {
 				function: f.into(),
 				arguments: args.into(),
 				pipe_out: [].into(),
 				pipe_in: [].into(),
 			}]
-			.into())
+			.into()))
 		}
-		Token::String(s) => Ok([Op::Return {
-			statement: Argument::String(s.into()),
-		}]
-		.into()),
+		Token::String(s) => Ok(Expression::String(s.into())),
 		Token::Variable(s) => {
 			assert_eq!(tokens.next(), Some(Token::Separator));
-			Ok([Op::Return {
-				statement: Argument::Variable(s.into()),
-			}]
-			.into())
+			Ok(Expression::Variable(s.into()))
 		}
-		Token::Integer(s) => Ok([Op::Return {
-			statement: Argument::Integer(s),
-		}]
-		.into()),
+		Token::Integer(s) => Ok(Expression::Integer(s)),
 		Token::Separator => todo!("unexpected separator (should we allow this?)"),
 		t => todo!("parse {:?}", t),
 	}
@@ -126,7 +114,10 @@ fn parse_inner<'a>(
 			Token::Word("if") => {
 				ops.push(Op::If {
 					condition: parse_expr(tokens)?,
-					if_true: parse_expr(tokens)?,
+					if_true: match parse_expr(tokens)? {
+						Expression::Statement(c) => c,
+						_ => [].into(), // TODO
+					},
 					if_false: [].into(), // TODO
 				})
 			}
@@ -140,13 +131,13 @@ fn parse_inner<'a>(
 					match tokens.next().unwrap() {
 						Token::ScopeOpen => todo!("scope open"),
 						Token::ScopeClose => todo!("scope close"),
-						Token::Word(s) => args.push(Argument::String(s.into())),
+						Token::Word(s) => args.push(Expression::String(s.into())),
 						Token::String(s) => {
 							// TODO unescape
-							args.push(Argument::String(s.into()))
+							args.push(Expression::String(s.into()))
 						}
-						Token::Variable(v) => args.push(Argument::Variable(v.into())),
-						Token::Integer(i) => args.push(Argument::Integer(i)),
+						Token::Variable(v) => args.push(Expression::Variable(v.into())),
+						Token::Integer(i) => args.push(Expression::Integer(i)),
 						Token::PipeOut { from, to } => pipe_out.push((from.into(), to.into())),
 						Token::PipeIn { from, to } => pipe_in.push((from.into(), to.into())),
 						t => todo!("parse {:?}", t),
@@ -159,36 +150,16 @@ fn parse_inner<'a>(
 					pipe_in: pipe_in.into(),
 				});
 			}
-			Token::String(s) => {
-				if next_is_close {
-					// TODO unescape string
-					ops.push(Op::Return {
-						statement: Argument::String(s.into()),
-					})
-				}
+			Token::Variable(s) if tokens.peek() == Some(&Token::Word("=")) => {
+				tokens.next().unwrap();
+				ops.push(Op::Assign {
+					variable: s.into(),
+					// TODO parse_expr would be a better fit
+					expression: parse_arg(tokens)?,
+				})
 			}
-			Token::Variable(s) => {
-				if next_is_close {
-					ops.push(Op::Return {
-						statement: Argument::Variable(s.into()),
-					})
-				} else if tokens.peek() == Some(&Token::Word("=")) {
-					tokens.next().unwrap();
-					ops.push(Op::Assign {
-						variable: s.into(),
-						// TODO parse_expr would be a better fit
-						statement: parse_arg(tokens)?,
-					})
-				} else {
-					todo!("variable {}", s);
-				}
-			}
-			Token::Integer(s) => {
-				if next_is_close {
-					ops.push(Op::Return {
-						statement: Argument::Integer(s),
-					})
-				}
+			Token::Variable(_) | Token::String(_) | Token::Integer(_) => {
+				// TODO add warning for redundant integer
 			}
 			Token::Separator => {}
 			t => todo!("parse {:?}", t),
@@ -218,8 +189,8 @@ mod test {
 			[Op::Call {
 				function: "print".into(),
 				arguments: [
-					Argument::String("Hello".into()),
-					Argument::String("world!".into()),
+					Expression::String("Hello".into()),
+					Expression::String("world!".into()),
 				]
 				.into(),
 				pipe_out: [].into(),
@@ -236,13 +207,13 @@ mod test {
 			[
 				Op::Call {
 					function: "print".into(),
-					arguments: [Argument::String("Hello".into()),].into(),
+					arguments: [Expression::String("Hello".into()),].into(),
 					pipe_out: [].into(),
 					pipe_in: [].into(),
 				},
 				Op::Call {
 					function: "print".into(),
-					arguments: [Argument::String("world!".into()),].into(),
+					arguments: [Expression::String("world!".into()),].into(),
 					pipe_out: [].into(),
 					pipe_in: [].into(),
 				}
@@ -256,19 +227,19 @@ mod test {
 		assert_eq!(
 			&*parse(TokenParser::new(s).map(Result::unwrap)).unwrap(),
 			[Op::If {
-				condition: [Op::Call {
+				condition: Expression::Statement([Op::Call {
 					function: "some_cond".into(),
 					arguments: [].into(),
 					pipe_out: [].into(),
 					pipe_in: [].into(),
 				},]
-				.into(),
+				.into()),
 				if_true: [Op::Call {
 					function: "print".into(),
 					arguments: [
-						Argument::String("it".into()),
-						Argument::String("is".into()),
-						Argument::String("true".into()),
+						Expression::String("it".into()),
+						Expression::String("is".into()),
+						Expression::String("true".into()),
 					]
 					.into(),
 					pipe_out: [].into(),
@@ -288,20 +259,20 @@ mod test {
 			[
 				Op::Assign {
 					variable: "a".into(),
-					statement: Argument::Integer(5),
+					expression: Expression::Integer(5),
 				},
 				Op::Assign {
 					variable: "b".into(),
-					statement: Argument::String("five".into()),
+					expression: Expression::String("five".into()),
 				},
 				Op::Call {
 					function: "print".into(),
 					arguments: [
-						Argument::Variable("a".into()),
-						Argument::String("is".into()),
-						Argument::String("pronounced".into()),
-						Argument::String("as".into()),
-						Argument::Variable("b".into()),
+						Expression::Variable("a".into()),
+						Expression::String("is".into()),
+						Expression::String("pronounced".into()),
+						Expression::String("as".into()),
+						Expression::Variable("b".into()),
 					]
 					.into(),
 					pipe_out: [].into(),

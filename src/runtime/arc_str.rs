@@ -8,8 +8,8 @@ use std::alloc::{alloc, dealloc};
 
 #[repr(C)]
 struct ArcStrInner {
-	size: usize,
 	refcount: AtomicUsize,
+	size: usize,
 	buffer: [u8; 0],
 }
 
@@ -80,6 +80,15 @@ impl From<&[u8]> for ArcStr {
 				inner: NonNull::new_unchecked(inner),
 			}
 		}
+	}
+}
+
+impl<R> From<&R> for ArcStr
+where
+	R: AsRef<[u8]>,
+{
+	fn from(s: &R) -> Self {
+		s.as_ref().into()
 	}
 }
 

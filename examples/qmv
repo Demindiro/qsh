@@ -5,6 +5,6 @@ find . -name *.rs >
 print Rust source files:
 print @
 
-grep < runtime >a
+grep < runtime >
 print Runtime source files:
-print @a
+print @

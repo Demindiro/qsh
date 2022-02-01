@@ -421,7 +421,9 @@ where
 				self.data.push(v);
 				e.insert(i);
 			}
-			Entry::Occupied(_) => todo!("occupied"),
+			Entry::Occupied(e) => {
+				statement.is_some().then(|| todo!("set occupied"));
+			}
 		}
 		self.variables = vars;
 	}

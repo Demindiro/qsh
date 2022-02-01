@@ -114,14 +114,14 @@ where
 }
 
 #[cfg(target_arch = "x86_64")]
-struct X64Compiler<F>
+struct X64Compiler<'a, F>
 where
 	F: Fn(&str) -> Option<QFunction>,
 {
 	jit: dynasmrt::x64::Assembler,
 	data: Vec<Value>,
 	resolve_fn: F,
-	variables: BTreeMap<Box<str>, usize>,
+	variables: BTreeMap<&'a str, usize>,
 	strings: Vec<u8>,
 	retval_defined: bool,
 	#[cfg(feature = "iced")]
@@ -131,7 +131,7 @@ where
 }
 
 #[cfg(target_arch = "x86_64")]
-impl<F> X64Compiler<F>
+impl<'a, F> X64Compiler<'a, F>
 where
 	F: Fn(&str) -> Option<QFunction>,
 {
@@ -197,7 +197,7 @@ where
 		}
 	}
 
-	fn compile(&mut self, ops: Box<[Op]>) {
+	fn compile(&mut self, ops: Box<[Op<'a>]>) {
 		for op in ops.into_vec() {
 			match op {
 				Op::Call {
@@ -283,7 +283,7 @@ where
 					#[cfg(feature = "iced")]
 					self.symbols.insert(
 						f as usize,
-						push_fn_name.then(|| "exec".into()).unwrap_or(function),
+						push_fn_name.then(|| "exec").unwrap_or(function).into(),
 					);
 
 					// Figure out whether we need to use the stack.
@@ -422,7 +422,7 @@ where
 		}
 	}
 
-	fn set_variable(&mut self, variable: Box<str>, expression: Option<Expression>) {
+	fn set_variable(&mut self, variable: &'a str, expression: Option<Expression>) {
 		let i = self.variables.len();
 		let mut vars = mem::take(&mut self.variables); // Avoid silly borrow errors
 		match vars.entry(variable) {

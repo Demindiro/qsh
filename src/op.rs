@@ -2,15 +2,15 @@ use crate::token::Token;
 use core::iter::Peekable;
 
 #[derive(Debug, PartialEq)]
-pub enum Op {
+pub enum Op<'a> {
 	Call {
-		function: Box<str>,
-		arguments: Box<[Expression]>,
-		pipe_out: Box<[(Box<str>, Box<str>)]>,
-		pipe_in: Box<[(Box<str>, Box<str>)]>,
+		function: &'a str,
+		arguments: Box<[Expression<'a>]>,
+		pipe_out: Box<[(&'a str, &'a str)]>,
+		pipe_in: Box<[(&'a str, &'a str)]>,
 	},
 	If {
-		condition: Expression,
+		condition: Expression<'a>,
 		if_true: Box<[Self]>,
 		if_false: Box<[Self]>,
 	},
@@ -22,28 +22,28 @@ pub enum Op {
 		range: ForRange,
 	},
 	Assign {
-		variable: Box<str>,
-		expression: Expression,
+		variable: &'a str,
+		expression: Expression<'a>,
 	},
 }
 
 #[derive(Debug, PartialEq)]
-pub enum Expression {
+pub enum Expression<'a> {
 	String(Box<str>),
-	Variable(Box<str>),
+	Variable(&'a str),
 	Integer(isize),
-	Statement(Box<[Op]>),
+	Statement(Box<[Op<'a>]>),
 }
 
 #[derive(Debug, PartialEq)]
 pub enum ForRange {}
 
-pub fn parse<'a>(mut tokens: impl Iterator<Item = Token<'a>>) -> Result<Box<[Op]>, ParseError> {
+pub fn parse<'a>(mut tokens: impl Iterator<Item = Token<'a>>) -> Result<Box<[Op<'a>]>, ParseError> {
 	parse_inner(Default::default(), &mut tokens.peekable(), false).map(|v| v.into())
 }
 
 /// Parse an argument, i.e. `print <arg> <arg> ...`
-fn parse_arg<'a, I>(tokens: &mut Peekable<I>) -> Result<Expression, ParseError>
+fn parse_arg<'a, I>(tokens: &mut Peekable<I>) -> Result<Expression<'a>, ParseError>
 where
 	I: Iterator<Item = Token<'a>>,
 {
@@ -55,14 +55,14 @@ where
 			// TODO unescape
 			Ok(Expression::String(s.into()))
 		}
-		Token::Variable(v) => Ok(Expression::Variable(v.into())),
+		Token::Variable(v) => Ok(Expression::Variable(v)),
 		Token::Integer(i) => Ok(Expression::Integer(i)),
 		t => todo!("parse {:?}", t),
 	}
 }
 
 /// Parse an "expression", i.e. `if <expr>`, `for v in <expr>`, ..
-fn parse_expr<'a, I>(tokens: &mut Peekable<I>) -> Result<Expression, ParseError>
+fn parse_expr<'a, I>(tokens: &mut Peekable<I>) -> Result<Expression<'a>, ParseError>
 where
 	I: Iterator<Item = Token<'a>>,
 {
@@ -78,18 +78,20 @@ where
 				}
 				args.push(parse_arg(tokens)?);
 			}
-			Ok(Expression::Statement([Op::Call {
-				function: f.into(),
-				arguments: args.into(),
-				pipe_out: [].into(),
-				pipe_in: [].into(),
-			}]
-			.into()))
+			Ok(Expression::Statement(
+				[Op::Call {
+					function: f,
+					arguments: args.into(),
+					pipe_out: [].into(),
+					pipe_in: [].into(),
+				}]
+				.into(),
+			))
 		}
 		Token::String(s) => Ok(Expression::String(s.into())),
 		Token::Variable(s) => {
 			assert_eq!(tokens.next(), Some(Token::Separator));
-			Ok(Expression::Variable(s.into()))
+			Ok(Expression::Variable(s))
 		}
 		Token::Integer(s) => Ok(Expression::Integer(s)),
 		Token::Separator => todo!("unexpected separator (should we allow this?)"),
@@ -98,10 +100,10 @@ where
 }
 
 fn parse_inner<'a>(
-	mut ops: Vec<Op>,
+	mut ops: Vec<Op<'a>>,
 	tokens: &mut Peekable<impl Iterator<Item = Token<'a>>>,
 	in_scope: bool,
-) -> Result<Vec<Op>, ParseError> {
+) -> Result<Vec<Op<'a>>, ParseError> {
 	while let Some(tk) = tokens.next() {
 		let next_is_close = tokens.peek().map_or(true, |t| t == &Token::ScopeClose);
 		match tk {
@@ -136,15 +138,15 @@ fn parse_inner<'a>(
 							// TODO unescape
 							args.push(Expression::String(s.into()))
 						}
-						Token::Variable(v) => args.push(Expression::Variable(v.into())),
+						Token::Variable(v) => args.push(Expression::Variable(v)),
 						Token::Integer(i) => args.push(Expression::Integer(i)),
-						Token::PipeOut { from, to } => pipe_out.push((from.into(), to.into())),
-						Token::PipeIn { from, to } => pipe_in.push((from.into(), to.into())),
+						Token::PipeOut { from, to } => pipe_out.push((from, to)),
+						Token::PipeIn { from, to } => pipe_in.push((from, to)),
 						t => todo!("parse {:?}", t),
 					}
 				}
 				ops.push(Op::Call {
-					function: f.into(),
+					function: f,
 					arguments: args.into(),
 					pipe_out: pipe_out.into(),
 					pipe_in: pipe_in.into(),
@@ -153,7 +155,7 @@ fn parse_inner<'a>(
 			Token::Variable(s) if tokens.peek() == Some(&Token::Word("=")) => {
 				tokens.next().unwrap();
 				ops.push(Op::Assign {
-					variable: s.into(),
+					variable: s,
 					// TODO parse_expr would be a better fit
 					expression: parse_arg(tokens)?,
 				})
@@ -227,13 +229,15 @@ mod test {
 		assert_eq!(
 			&*parse(TokenParser::new(s).map(Result::unwrap)).unwrap(),
 			[Op::If {
-				condition: Expression::Statement([Op::Call {
-					function: "some_cond".into(),
-					arguments: [].into(),
-					pipe_out: [].into(),
-					pipe_in: [].into(),
-				},]
-				.into()),
+				condition: Expression::Statement(
+					[Op::Call {
+						function: "some_cond".into(),
+						arguments: [].into(),
+						pipe_out: [].into(),
+						pipe_in: [].into(),
+					},]
+					.into()
+				),
 				if_true: [Op::Call {
 					function: "print".into(),
 					arguments: [

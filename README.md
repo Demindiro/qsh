@@ -73,6 +73,11 @@ extracted using pipes.
 The main mechanism for exchanging data with programs are streams: data is
 continuously written and read from a stream.
 
+in `qsh`, streams and strings are identical from an abstract viewpoint. In
+practice they have different performance characteristics: while strings are
+stored entirely in memory, streams instead only buffer a portion of data at
+any time. This makes them ideal for exchanging a large amount of data.
+
 Estabilishing a stream from one program to another is done through pipes.
 Each pipe has exactly one input and one output, i.e.:
 

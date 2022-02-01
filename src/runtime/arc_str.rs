@@ -83,6 +83,15 @@ impl From<&[u8]> for ArcStr {
 	}
 }
 
+impl<R> From<&R> for ArcStr
+where
+	R: AsRef<[u8]>,
+{
+	fn from(s: &R) -> Self {
+		s.as_ref().into()
+	}
+}
+
 impl From<&str> for ArcStr {
 	#[inline]
 	fn from(s: &str) -> Self {

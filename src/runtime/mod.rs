@@ -199,16 +199,21 @@ pub fn exec(args: &[TValue], out: &mut [OutValue<'_>], inv: &[InValue<'_>]) -> i
 	let mut stderr = Stdio::inherit();
 	let mut val = None;
 	for i in inv {
-		if i.name() == "0" {
-			stdin = Stdio::piped();
-			val = Some(i.value());
-			break;
+		match i.name() {
+			"" | "0" => {
+				stdin = Stdio::piped();
+				val = Some(i.value());
+				break;
+			}
+			_ => (),
 		}
 	}
+	let mut outv = None;
+	let mut errv = None;
 	for o in out {
 		match o.name() {
-			"1" => stdout = Stdio::piped(),
-			"2" => stderr = Stdio::piped(),
+			"" | "1" => (stdout, outv) = (Stdio::piped(), Some(o)),
+			"2" => (stderr, errv) = (Stdio::piped(), Some(o)),
 			_ => (),
 		}
 	}
@@ -220,8 +225,26 @@ pub fn exec(args: &[TValue], out: &mut [OutValue<'_>], inv: &[InValue<'_>]) -> i
 		.stderr(stderr)
 		.spawn()
 		.unwrap();
-	let code = cmd.wait().unwrap().code().unwrap_or(-1);
-	code.try_into().unwrap()
+
+	if let Some(mut i) = cmd.stdin.take() {
+		i.write_all(val.unwrap().to_string().as_bytes()).unwrap();
+	}
+
+	match (cmd.stdout.take(), cmd.stderr.take()) {
+		(Some(o), Some(e)) => todo!("two streams"),
+		(Some(mut o), None) => {
+			let mut b = Default::default();
+			o.read_to_end(&mut b).unwrap();
+			outv.unwrap().set_value(Value::String((&b).into()));
+		}
+		(None, Some(mut e)) => {
+			let mut b = Default::default();
+			e.read_to_end(&mut b).unwrap();
+			errv.unwrap().set_value(Value::String((&b).into()));
+		}
+		(None, None) => (),
+	}
+	cmd.wait().unwrap().code().unwrap_or(-1).try_into().unwrap()
 }
 
 wrap_ffi!(pub ffi_print = print);

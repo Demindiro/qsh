@@ -1,5 +1,5 @@
-use core::ops::Deref;
 use core::marker::PhantomData;
+use core::ops::Deref;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::io::{self, Read};

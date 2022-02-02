@@ -19,7 +19,9 @@ pub enum Op<'a> {
 		while_true: Box<[Self]>,
 	},
 	For {
-		range: ForRange,
+		variable: &'a str,
+		range: ForRange<'a>,
+		for_each: Box<[Self]>,
 	},
 	Assign {
 		variable: &'a str,
@@ -36,7 +38,9 @@ pub enum Expression<'a> {
 }
 
 #[derive(Debug, PartialEq)]
-pub enum ForRange {}
+pub enum ForRange<'a> {
+	Variable(&'a str),
+}
 
 pub fn parse<'a>(mut tokens: impl Iterator<Item = Token<'a>>) -> Result<Box<[Op<'a>]>, ParseError> {
 	parse_inner(Default::default(), &mut tokens.peekable(), false).map(|v| v.into())
@@ -61,6 +65,55 @@ where
 	}
 }
 
+/// Parse an `if` expression.
+fn parse_if<'a, I>(tokens: &mut Peekable<I>) -> Result<Op<'a>, ParseError>
+where
+	I: Iterator<Item = Token<'a>>,
+{
+	Ok(Op::If {
+		condition: parse_expr(tokens)?,
+		if_true: match parse_expr(tokens)? {
+			Expression::Statement(c) => c,
+			_ => [].into(), // TODO
+		},
+		if_false: [].into(), // TODO
+	})
+}
+
+/// Parse a `for` expression.
+fn parse_for<'a, I>(tokens: &mut Peekable<I>) -> Result<Op<'a>, ParseError>
+where
+	I: Iterator<Item = Token<'a>>,
+{
+	if let Some(Token::Word(variable)) = tokens.next() {
+		if tokens.next() != Some(Token::Word("in")) {
+			return Err(ParseError::ExpectedIn);
+		}
+		let range = match parse_expr(tokens)? {
+			Expression::Variable(v) => ForRange::Variable(v),
+			t => todo!("{:?} range in for loop", t),
+		};
+		Ok(Op::For {
+			variable,
+			range,
+			for_each: match parse_expr(tokens)? {
+				Expression::Statement(v) => v,
+				t => todo!("{:?} for_each in for loop", t),
+			},
+		})
+	} else {
+		return Err(ParseError::ExpectedVariable);
+	}
+}
+
+/// Parse a `while` expression.
+fn parse_while<'a, I>(tokens: &mut Peekable<I>) -> Result<Op<'a>, ParseError>
+where
+	I: Iterator<Item = Token<'a>>,
+{
+	todo!("while")
+}
+
 /// Parse an "expression", i.e. `if <expr>`, `for v in <expr>`, ..
 fn parse_expr<'a, I>(tokens: &mut Peekable<I>) -> Result<Expression<'a>, ParseError>
 where
@@ -69,6 +122,9 @@ where
 	match tokens.next().expect("todo") {
 		Token::ScopeOpen => todo!("scope open"),
 		Token::ScopeClose => todo!("scope close"),
+		Token::Word("if") => Ok(Expression::Statement([parse_if(tokens)?].into())),
+		Token::Word("for") => Ok(Expression::Statement([parse_for(tokens)?].into())),
+		Token::Word("while") => Ok(Expression::Statement([parse_while(tokens)?].into())),
 		Token::Word(f) => {
 			let mut args = Vec::new();
 			while let Some(tk) = tokens.peek() {
@@ -113,18 +169,9 @@ fn parse_inner<'a>(
 					.then(|| ops.into())
 					.ok_or(ParseError::CloseScopeWithoutOpen);
 			}
-			Token::Word("if") => {
-				ops.push(Op::If {
-					condition: parse_expr(tokens)?,
-					if_true: match parse_expr(tokens)? {
-						Expression::Statement(c) => c,
-						_ => [].into(), // TODO
-					},
-					if_false: [].into(), // TODO
-				})
-			}
-			Token::Word("for") => todo!("for"),
-			Token::Word("while") => todo!("for"),
+			Token::Word("if") => ops.push(parse_if(tokens)?),
+			Token::Word("for") => ops.push(parse_for(tokens)?),
+			Token::Word("while") => ops.push(parse_while(tokens)?),
 			Token::Word(f) => {
 				let mut args = Vec::new();
 				let mut pipe_out = Vec::new();
@@ -176,6 +223,8 @@ fn parse_inner<'a>(
 pub enum ParseError {
 	CloseScopeWithoutOpen,
 	UnclosedScope,
+	ExpectedVariable,
+	ExpectedIn,
 }
 
 #[cfg(test)]
@@ -283,6 +332,39 @@ mod test {
 					pipe_in: [].into(),
 				},
 			]
+		);
+	}
+
+	#[test]
+	fn for_loop() {
+		let s = "for a in @; if test -n @a; print @a";
+		assert_eq!(
+			&*parse(TokenParser::new(s).map(Result::unwrap)).unwrap(),
+			[Op::For {
+				variable: "a".into(),
+				range: ForRange::Variable(""),
+				for_each: [Op::If {
+					condition: Expression::Statement(
+						[Op::Call {
+							function: "test",
+							arguments:
+								[Expression::String("-n".into()), Expression::Variable("a"),].into(),
+							pipe_in: [].into(),
+							pipe_out: [].into(),
+						},]
+						.into()
+					),
+					if_true: [Op::Call {
+						function: "print",
+						arguments: [Expression::Variable("a")].into(),
+						pipe_in: [].into(),
+						pipe_out: [].into(),
+					},]
+					.into(),
+					if_false: [].into(),
+				}]
+				.into(),
+			},]
 		);
 	}
 }

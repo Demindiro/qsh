@@ -13,3 +13,13 @@ if @?; print "success (grep)"
 
 print Runtime source files:
 print @
+
+split <
+
+split < >
+
+print splitted: @
+
+for a in @
+	if test -n @a
+		print ">" @a

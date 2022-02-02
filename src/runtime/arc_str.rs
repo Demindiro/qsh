@@ -1,3 +1,4 @@
+use super::arc_array::{ArcArray, TArcArray};
 use core::alloc::Layout;
 use core::fmt;
 use core::marker::PhantomData;
@@ -6,80 +7,22 @@ use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::{alloc, dealloc};
 
-#[repr(C)]
-struct ArcStrInner {
-	refcount: AtomicUsize,
-	size: usize,
-	buffer: [u8; 0],
-}
-
 /// A reference-counted string usable with FFI.
 ///
 /// Note that this string may not be valid UTF-8.
+#[derive(Clone)]
 #[repr(transparent)]
-pub struct ArcStr {
-	inner: NonNull<ArcStrInner>,
-}
+pub struct ArcStr(ArcArray<u8>);
 
 impl ArcStr {
-	#[inline]
-	fn layout(len: usize) -> Layout {
-		Layout::new::<ArcStrInner>()
-			.extend(Layout::array::<u8>(len).unwrap())
-			.unwrap()
-			.0
-	}
-
-	/// # Safety
-	///
-	/// This object may not be reused after this call.
-	// Never inline to prevent bloat when inlining drop()
-	#[inline(never)]
-	unsafe fn dealloc(&mut self) {
-		dealloc(
-			self.inner.as_ptr().cast(),
-			Self::layout(self.inner.as_ref().size),
-		)
-	}
-}
-
-impl Clone for ArcStr {
-	#[inline]
-	fn clone(&self) -> Self {
-		// SAFETY: self.inner is a valid pointer
-		unsafe {
-			self.inner.as_ref().refcount.fetch_add(1, Ordering::Relaxed);
-			Self { inner: self.inner }
-		}
-	}
-}
-
-impl Drop for ArcStr {
-	#[inline]
-	fn drop(&mut self) {
-		// SAFETY: self.inner is a valid pointer
-		unsafe {
-			if self.inner.as_ref().refcount.fetch_sub(1, Ordering::Relaxed) == 0 {
-				self.dealloc();
-			}
-		}
-	}
+	// For internal use only
+	pub(super) const EMPTY: Self = Self(ArcArray::EMPTY);
 }
 
 impl From<&[u8]> for ArcStr {
+	#[inline(always)]
 	fn from(s: &[u8]) -> Self {
-		unsafe {
-			let inner = alloc(Self::layout(s.len())).cast::<ArcStrInner>();
-			inner.write(ArcStrInner {
-				size: s.len(),
-				refcount: AtomicUsize::new(0),
-				buffer: [],
-			});
-			ptr::copy_nonoverlapping(s.as_ptr(), inner.add(1).cast::<u8>(), s.len());
-			Self {
-				inner: NonNull::new_unchecked(inner),
-			}
-		}
+		Self(s.iter().copied().into())
 	}
 }
 
@@ -87,50 +30,44 @@ impl<R> From<&R> for ArcStr
 where
 	R: AsRef<[u8]>,
 {
+	#[inline(always)]
 	fn from(s: &R) -> Self {
 		s.as_ref().into()
 	}
 }
 
 impl From<&str> for ArcStr {
-	#[inline]
+	#[inline(always)]
 	fn from(s: &str) -> Self {
 		s.as_bytes().into()
 	}
 }
 
 impl AsRef<[u8]> for ArcStr {
-	#[inline]
+	#[inline(always)]
 	fn as_ref(&self) -> &[u8] {
-		// SAFETY: self.inner is a valid pointer and size matches the real length of the buffer.
-		unsafe {
-			let inner = self.inner.as_ref();
-			core::slice::from_raw_parts(inner.buffer.as_ptr(), inner.size)
-		}
+		self.0.as_ref()
 	}
 }
 
 impl Deref for ArcStr {
 	type Target = [u8];
 
-	#[inline]
+	#[inline(always)]
 	fn deref(&self) -> &Self::Target {
-		self.as_ref()
+		self.0.deref()
 	}
 }
 
 impl fmt::Debug for ArcStr {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		String::from_utf8_lossy(self.as_ref())
-			.escape_debug()
-			.collect::<String>()
-			.fmt(f)
+		fmt_debug(self, f)
 	}
 }
 
 impl fmt::Display for ArcStr {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		String::from_utf8_lossy(self.as_ref()).fmt(f)
+		fmt_display(self, f)
 	}
 }
 
@@ -138,46 +75,61 @@ impl fmt::Display for ArcStr {
 ///
 /// This type avoids an extra indirection while still maintaining lifetime invariants.
 #[derive(Clone, Copy)]
-pub struct TArcStr<'a> {
-	inner: NonNull<ArcStrInner>,
-	_marker: PhantomData<&'a ArcStr>,
-}
+#[repr(transparent)]
+pub struct TArcStr<'a>(TArcArray<'a, u8>);
 
-impl<'a> From<&'a ArcStr> for TArcStr<'a> {
+impl<'a> TArcStr<'a> {
+	/// Increase the reference count and take ownership of the string.
 	#[inline]
-	fn from(s: &'a ArcStr) -> Self {
-		TArcStr {
-			inner: s.inner,
-			_marker: PhantomData,
-		}
+	pub fn upgrade(self) -> ArcStr {
+		ArcStr((&*self.0).clone())
 	}
 }
 
-impl<'a> AsRef<ArcStr> for TArcStr<'a> {
-	#[inline]
-	fn as_ref(&self) -> &ArcStr {
-		// SAFETY: ArcStr is transparent
-		unsafe { &*(&self.inner as *const NonNull<ArcStrInner> as *const ArcStr) }
+impl<'a> From<&'a ArcStr> for TArcStr<'a> {
+	#[inline(always)]
+	fn from(s: &'a ArcStr) -> Self {
+		Self((&s.0).into())
+	}
+}
+
+impl<'a> AsRef<[u8]> for TArcStr<'a> {
+	#[inline(always)]
+	fn as_ref(&self) -> &[u8] {
+		self.0.as_ref()
 	}
 }
 
 impl<'a> Deref for TArcStr<'a> {
-	type Target = ArcStr;
+	type Target = [u8];
 
-	#[inline]
+	#[inline(always)]
 	fn deref(&self) -> &Self::Target {
-		self.as_ref()
+		self.0.deref()
 	}
 }
 
-impl<'a> fmt::Debug for TArcStr<'a> {
+impl fmt::Debug for TArcStr<'_> {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		self.as_ref().fmt(f)
+		fmt_debug(self, f)
 	}
 }
 
-impl<'a> fmt::Display for TArcStr<'a> {
+impl fmt::Display for TArcStr<'_> {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		self.as_ref().fmt(f)
+		fmt_display(self, f)
 	}
+}
+
+fn fmt_debug(s: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
+	use fmt::Debug;
+	String::from_utf8_lossy(s.as_ref())
+		.escape_debug()
+		.collect::<String>()
+		.fmt(f)
+}
+
+fn fmt_display(s: &[u8], f: &mut fmt::Formatter) -> fmt::Result {
+	use fmt::Display;
+	String::from_utf8_lossy(s.as_ref()).fmt(f)
 }

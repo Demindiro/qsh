@@ -8,8 +8,9 @@ dynasmrt = "*"
 iced-x86 = { optional = true, version = "*" }
 
 [features]
-default = ["iced"]
+default = ["iced", "catch_unwind"]
 iced = ["iced-x86"]
+catch_unwind = []
 
 [profile.release]
 debug = true

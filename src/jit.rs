@@ -1,4 +1,4 @@
-use crate::op::{Expression, Op};
+use crate::op::{Expression, Op, ForRange};
 use crate::runtime::*;
 use core::fmt;
 use core::mem;
@@ -11,7 +11,7 @@ pub struct Function {
 	exec: ExecutableBuffer,
 	data_offset: AssemblyOffset,
 	#[cfg(feature = "iced")]
-	symbols: Rc<BTreeMap<usize, Box<str>>>,
+	symbols: Rc<BTreeMap<usize, Vec<Box<str>>>>,
 	#[cfg(feature = "iced")]
 	comments: BTreeMap<usize, String>,
 }
@@ -34,7 +34,7 @@ impl fmt::Debug for Function {
 		};
 		let mut dec = Decoder::new(64, &self.exec[..self.data_offset.0], 0);
 
-		struct Symbols(Rc<BTreeMap<usize, Box<str>>>);
+		struct Symbols(Rc<BTreeMap<usize, Vec<Box<str>>>>);
 
 		impl SymbolResolver for Symbols {
 			fn symbol(
@@ -49,7 +49,7 @@ impl fmt::Debug for Function {
 					// "How many data structures do you want?" "Yes"
 					// implement From<&str> pls
 					let text = SymResTextInfo::Text(SymResTextPart {
-						text: SymResString::Str(&*s),
+						text: SymResString::Str(&*s[0]),
 						color: FormatterTextKind::Label,
 					});
 					SymbolResult {
@@ -69,13 +69,17 @@ impl fmt::Debug for Function {
 		fmt.options_mut().set_hex_suffix("");
 		fmt.options_mut().set_uppercase_hex(false);
 		fmt.options_mut().set_rip_relative_addresses(true);
+
+		writeln!(f, "")?;
 		let mut s = String::new();
 		while dec.can_decode() {
 			s.clear();
 			let instr = dec.decode();
 			fmt.format(&instr, &mut s);
 			if let Some(s) = self.symbols.get(&instr.ip().try_into().unwrap()) {
-				writeln!(f, "{}:", s)?;
+				for s in s.iter() {
+					writeln!(f, "{}:", s)?;
+				}
 			}
 			write!(f, "{:4x}  ", instr.ip())?;
 			for b in &self.exec[instr.ip() as usize..][..instr.len()] {
@@ -125,9 +129,12 @@ where
 	strings: Vec<u8>,
 	retval_defined: bool,
 	#[cfg(feature = "iced")]
-	symbols: BTreeMap<usize, Box<str>>,
+	symbols: BTreeMap<usize, Vec<Box<str>>>,
 	#[cfg(feature = "iced")]
 	comments: BTreeMap<usize, String>,
+	// FIXME hack to prevent allocations inside loops
+	loop_depth: usize,
+	stack_offset: usize,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -147,10 +154,13 @@ where
 			symbols: Default::default(),
 			#[cfg(feature = "iced")]
 			comments: Default::default(),
+			loop_depth: 0,
+			stack_offset: 0,
 		}
 	}
 
 	fn finish(mut self) -> Function {
+		assert_eq!(self.stack_offset, 0, "stack is not properly restored");
 		self.comment("return");
 		match self.variables.len() * 16 {
 			8 => dynasm!(self.jit ; pop rdi),
@@ -168,7 +178,7 @@ where
 		#[cfg(feature = "iced")]
 		for i in 0..self.data.len() * 16 {
 			self.symbols
-				.insert(data_offset.0 + i, format!("data+{}", i).into());
+				.insert(data_offset.0 + i, Vec::from([format!("data+{}", i).into()]));
 		}
 		for d in self.data {
 			let [a, b] = unsafe { mem::transmute::<_, [u64; 2]>(d) };
@@ -184,7 +194,7 @@ where
 		#[cfg(feature = "iced")]
 		for i in 0..self.strings.len() {
 			self.symbols
-				.insert(strings_offset.0 + i, format!("strings+{}", i).into());
+				.insert(strings_offset.0 + i, Vec::from([format!("strings+{}", i).into()]));
 		}
 		self.jit.extend(self.strings);
 		Function {
@@ -206,7 +216,7 @@ where
 					pipe_out,
 					pipe_in,
 				} => {
-					self.comment("call ".to_string() + &function);
+					self.comment(format!("call '{}'", &function));
 					// Resolve function or default to 'exec'
 					let (f, push_fn_name) = (self.resolve_fn)(&*function)
 						.map(|f| (f, false))
@@ -215,13 +225,12 @@ where
 
 					// Reserve space for out values (if they don't exist yet)
 					for (from, to) in pipe_out.iter() {
-						dbg!(&from, &to);
 						self.set_variable((&**to).into(), None);
 					}
 
 					// How much the stack has grown in bytes.
 					// Used for calculating offsets to variables.
-					let mut stack_bytes = 0;
+					let mut stack_bytes = self.stack_offset;
 
 					// Create out list
 					self.comment("out pipes");
@@ -231,8 +240,8 @@ where
 						let str_offt = self.strings.len();
 						self.strings.push(from.len().try_into().unwrap());
 						self.strings.extend(from.bytes());
-						let offt = self.variables.len() - self.variables[&*to] - 1;
-						let offt = (offt * 16 + stack_bytes).try_into().unwrap();
+						let offt = self.variable_offset(to).unwrap();
+						let offt = offt.checked_add(stack_bytes.try_into().unwrap()).unwrap();
 						dynasm!(self.jit
 							// value pointer
 							; lea rax, [rsp + offt]
@@ -256,8 +265,8 @@ where
 						let str_offt = self.strings.len();
 						self.strings.push(to.len().try_into().unwrap());
 						self.strings.extend(to.bytes());
-						let offt = self.variables.len() - self.variables[&*from] - 1;
-						let offt = (offt * 16 + stack_bytes + 8).try_into().unwrap();
+						let offt = self.variable_offset(from).unwrap();
+						let offt = offt + i32::try_from(stack_bytes + 8).unwrap();
 						dynasm!(self.jit
 							// value
 							; push QWORD [rsp + offt]
@@ -277,14 +286,18 @@ where
 					// Note start of data if all arguments are static. Also push program name
 					// if using 'exec'
 					let i = self.data.len();
-					if push_fn_name {
-						self.data.push(Value::String((&*function).into()));
-					}
+					let fn_str_val = if push_fn_name {
+						let f = Value::String((&*function).into());
+						let fp = unsafe { core::mem::transmute_copy::<_, [i64; 2]>(&f) };
+						self.data.push(f);
+						Some(fp)
+					} else {
+						None
+					};
 					#[cfg(feature = "iced")]
-					self.symbols.insert(
-						f as usize,
-						push_fn_name.then(|| "exec").unwrap_or(function).into(),
-					);
+					self.symbols.entry(f as usize)
+						.or_default()
+						.push(push_fn_name.then(|| "exec").unwrap_or(function).into());
 
 					// Figure out whether we need to use the stack.
 					let use_stack = arguments.iter().any(|a| match a {
@@ -302,8 +315,8 @@ where
 							let v = match a {
 								Expression::String(s) => Value::String((&*s).into()),
 								Expression::Variable(v) => {
+									dbg!("var", &v);
 									let offt = self.variables.len() - self.variables[&v] - 1;
-									dbg!(offt, stack_bytes);
 									let offt = (offt * 16 + stack_bytes + 8).try_into().unwrap();
 									dynasm!(self.jit
 										; push QWORD [rsp + offt]
@@ -315,7 +328,17 @@ where
 								_ => todo!("argument {:?}", a),
 							};
 							stack_bytes += self.push_stack_value((&v).into());
+							dbg!("str", &v);
 							self.data.push(v);
+						}
+						if let Some([a, b]) = fn_str_val {
+							dynasm!(self.jit
+								; mov rax, QWORD b
+								; push rax
+								; mov rax, QWORD a
+								; push rax
+							);
+							stack_bytes += 16;
 						}
 						if let Ok(n) = len.try_into() {
 							dynasm!(self.jit ; mov edi, DWORD n);
@@ -353,13 +376,16 @@ where
 					// so offset by 8
 					self.comment("call");
 					(stack_bytes % 16 != 8).then(|| dynasm!(self.jit ; push rbx));
+					//(self.stack_offset > 0).then(|| dynasm!(self.jit; ud2));
 					dynasm!(self.jit
 						; mov rax, QWORD f as _
 						; call rax
 					);
+					//(self.stack_offset > 0).then(|| dynasm!(self.jit; ud2));
 					(stack_bytes % 16 != 8).then(|| dynasm!(self.jit ; pop rbx));
 
 					// Restore stack
+					stack_bytes -= self.stack_offset;
 					if let Ok(n) = stack_bytes.try_into() {
 						dynasm!(self.jit ; add rsp, BYTE n);
 					} else {
@@ -386,6 +412,7 @@ where
 						c => todo!("condition {:?}", c),
 					}
 					dynasm!(self.jit
+						;; self.comment("skip if not 0")
 						; test rax, rax
 						// FIXME 1-byte jumps may not always be possible.
 						// Some sort of rollback mechanism if it fails would be useful.
@@ -399,18 +426,73 @@ where
 							; if_false:
 						);
 						self.compile(if_false);
-						#[cfg(feature = "iced")]
-						self.symbols.insert(self.jit.offset().0, "if_true".into());
 						dynasm!(self.jit
+							;; self.symbol("if_true")
 							; if_true:
 						);
 					} else {
-						#[cfg(feature = "iced")]
-						self.symbols.insert(self.jit.offset().0, "if_false".into());
 						dynasm!(self.jit
+							;; self.symbol("if_false")
 							; if_false:
 						);
 					}
+				}
+				Op::For {
+					variable,
+					range,
+					for_each,
+				} => {
+					self.comment("for");
+					self.set_variable(variable, None);
+					let range = match range {
+						ForRange::Variable(v) => v,
+					};
+					let range_offt = self.variable_offset(range).unwrap();
+					let var_offt = self.variable_offset(variable).unwrap();
+
+					// FIXME declaring new rangeiables in the loop will corrupt the stack
+					self.loop_depth += 1;
+
+					dynasm!(self.jit
+						;; self.comment("test if array")
+						; mov rax, [rsp + range_offt]
+						; cmp rax, BYTE Value::ARRAY_DISCRIMINANT.try_into().unwrap()
+						;; self.comment("skip if not array")
+						; jne >for_end
+						;; self.comment("save previous iteration or caller")
+						; push rbx
+						; push r12
+						;; self.stack_offset += 16
+						;; self.comment("load array pointer")
+						; mov rbx, [i32::try_from(self.stack_offset).unwrap() + rsp + range_offt + 8]
+						;; self.comment("calculate end address")
+						; mov r12, [rbx + 8]
+						; add r12, r12 // size * 2 (1 byte shorter than shl r12, 4)
+						; lea r12, [rbx + 16 + r12 * 8] // base + 16 + size * 16
+						;; self.comment("check if array is empty")
+						; jmp >for_array_check
+						;; self.symbol("for_array")
+						; for_array:
+						;; self.comment(format!("load element into @{}", variable))
+						; mov rax, [rbx + 0]
+						; mov rdx, [rbx + 8]
+						; mov [i32::try_from(self.stack_offset).unwrap() + rsp + var_offt + 0], rax
+						; mov [i32::try_from(self.stack_offset).unwrap() + rsp + var_offt + 8], rdx
+						;; self.compile(for_each)
+						;; self.symbol("for_array_check")
+						; for_array_check:
+						; add rbx, 16
+						; cmp rbx, r12
+						; jne <for_array
+						;; self.comment("restore previous iteration or caller")
+						;; self.stack_offset -= 16
+						; pop r12
+						; pop rbx
+						;; self.symbol("for_end")
+						; for_end:
+					);
+
+					self.loop_depth -= 1;
 				}
 				Op::Assign {
 					variable,
@@ -429,6 +511,8 @@ where
 		let mut vars = mem::take(&mut self.variables); // Avoid silly borrow errors
 		match vars.entry(variable) {
 			Entry::Vacant(e) => {
+				self.comment(format!("new variable @{}", variable));
+				assert_eq!(self.loop_depth, 0, "fix variable allocation in loops");
 				let v = match expression {
 					Some(Expression::String(s)) => Value::String((&*s).into()),
 					None => Value::Nil,
@@ -443,6 +527,10 @@ where
 			}
 		}
 		self.variables = vars;
+	}
+
+	fn variable_offset(&self, variable: &str) -> Option<i32> {
+		Some(((self.variables.len() - self.variables.get(variable)? - 1) * 16).try_into().unwrap())
 	}
 
 	fn push_stack(&mut self, v: i64) -> usize {
@@ -470,6 +558,15 @@ where
 			})
 			.or_insert_with(|| comment.into());
 	}
+
+	fn symbol(&mut self, symbol: impl Into<String>) {
+		let _s = symbol;
+		#[cfg(feature = "iced")]
+		self.symbols
+			.entry(self.jit.offset().0)
+			.or_default()
+			.push(_s.into().into());
+	}
 }
 
 #[cfg(test)]
@@ -485,13 +582,20 @@ mod test {
 	}
 
 	fn print(args: &[TValue], out: &mut [OutValue<'_>], inv: &[InValue<'_>]) -> isize {
+		let it = args.iter().map(|v| v.to_string().chars().collect::<Vec<_>>()).intersperse_with(|| Vec::from([' '])).flatten();
+		for o in out {
+			match o.name() {
+				"" | "1" => {
+					let s = (&it.collect::<String>()).into();
+					o.set_value(Value::String(s));
+					return 0;
+				}
+				_ => (),
+			}
+		}
 		OUT.with(|out| {
 			let mut out = out.borrow_mut();
-			for (i, a) in args.iter().enumerate() {
-				dbg!(unsafe { mem::transmute_copy::<_, [u64; 2]>(a) });
-				(i > 0).then(|| out.push(' '));
-				out.extend(a.to_string().chars());
-			}
+			out.extend(it);
 			out.push('\n');
 		});
 		0
@@ -529,9 +633,12 @@ mod test {
 		let stdout = String::from_utf8_lossy(&stdout);
 		OUT.with(|o| {
 			for o in out {
-				if o.name() == "1" {
-					o.set_value(Value::String((&*stdout).into()));
-					return;
+				match o.name() {
+					"" | "1" => {
+						o.set_value(Value::String((&*stdout).into()));
+						return;
+					}
+					_ => (),
 				}
 			}
 			o.borrow_mut().extend(stdout.chars())
@@ -550,16 +657,19 @@ mod test {
 		match f {
 			"print" => Some(ffi_print),
 			"exec" => Some(ffi_exec),
+			"split" => Some(ffi_split),
 			_ => None,
 		}
 	}
 
+	fn compile(s: &str) -> Function {
+		let ops = parse(TokenParser::new(s).map(Result::unwrap)).unwrap();
+		super::compile(ops, resolve_fn)
+	}
+
 	fn run(s: &str) {
 		clear_out();
-		let ops = parse(TokenParser::new(s).map(Result::unwrap)).unwrap();
-		let f = compile(ops, resolve_fn);
-		dbg!(&f);
-		f.call(&[]);
+		compile(s).call(&[])
 	}
 
 	#[test]
@@ -589,6 +699,14 @@ mod test {
 	}
 
 	#[test]
+	fn call_if() {
+		run("if test -n \"aa\"; print yes");
+		OUT.with(|out| assert_eq!("yes\n", &*out.borrow()));
+		run("if test -n \"\"; print yes");
+		OUT.with(|out| assert_eq!("", &*out.borrow()));
+	}
+
+	#[test]
 	fn variable() {
 		run("@a = 5; @b = \"five\"; print @a is pronounced as @b");
 		OUT.with(|out| assert_eq!("5 is pronounced as five\n", &*out.borrow()));
@@ -604,5 +722,17 @@ mod test {
 	fn cat() {
 		run("echo chickens are neat 1>; cat 0<");
 		OUT.with(|out| assert_eq!("chickens are neat\n", &*out.borrow()));
+	}
+
+	#[test]
+	fn for_loop() {
+		run("print abcde >; split \"\" < >; for a in @; print @a");
+		OUT.with(|out| assert_eq!("a\nb\nc\nd\ne\n", &*out.borrow()));
+	}
+
+	#[test]
+	fn for_if_loop() {
+		run("printf abcde\\n >; split < >; for a in @; if test -n @a; print @a");
+		OUT.with(|out| assert_eq!("abcde\n", &*out.borrow()));
 	}
 }

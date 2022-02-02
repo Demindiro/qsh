@@ -1,11 +1,14 @@
+mod arc_array;
 mod arc_str;
+mod array;
 mod pipe;
 
 pub use arc_str::{ArcStr, TArcStr};
+pub use array::{Array, TArray};
 pub use pipe::{Pipe, TPipe};
 
 use core::fmt;
-use core::mem;
+use core::mem::{self, ManuallyDrop};
 use core::ptr::NonNull;
 use core::slice;
 use core::str;
@@ -26,23 +29,19 @@ pub enum Value {
 	String(ArcStr),
 	Integer(isize),
 	Pipe(Pipe),
+	Array(Array),
 }
 
 impl Value {
-	#[inline(always)]
-	pub const fn string_discriminant() -> ValueDiscriminant {
-		const V: Value = Value::Integer(0);
-		V.discriminant()
-	}
+	pub const NIL_DISCRIMINANT: ValueDiscriminant = Value::Nil.discriminant();
+	pub const STRING_DISCRIMINANT: ValueDiscriminant = Value::String(ArcStr::EMPTY).discriminant();
+	pub const INTEGER_DISCRIMINANT: ValueDiscriminant = Value::Integer(0).discriminant();
+	pub const ARRAY_DISCRIMINANT: ValueDiscriminant = Value::Array(Array::EMPTY).discriminant();
 
-	#[inline(always)]
-	pub const fn integer_discriminant() -> ValueDiscriminant {
-		const V: Value = Value::Integer(0);
-		V.discriminant()
-	}
-
-	const fn discriminant(&self) -> ValueDiscriminant {
-		unsafe { mem::transmute::<_, ValueDiscriminant>(mem::discriminant(self)) }
+	const fn discriminant(self) -> ValueDiscriminant {
+		let d = unsafe { mem::transmute::<_, ValueDiscriminant>(mem::discriminant(&self)) };
+		mem::forget(self);
+		d
 	}
 }
 
@@ -53,6 +52,7 @@ impl fmt::Display for Value {
 			Self::String(s) => s.fmt(f),
 			Self::Integer(s) => s.fmt(f),
 			Self::Pipe(_) => f.write_str("<pipe>"),
+			Self::Array(s) => s.fmt(f),
 		}
 	}
 }
@@ -63,6 +63,7 @@ pub enum TValue<'a> {
 	String(TArcStr<'a>),
 	Integer(isize),
 	Pipe(TPipe<'a>),
+	Array(TArray<'a>),
 }
 
 const fn _check(v: &Value, t: &TValue) -> u8 {
@@ -82,6 +83,7 @@ impl<'a> From<&'a Value> for TValue<'a> {
 			Value::String(s) => Self::String(s.into()),
 			Value::Integer(s) => Self::Integer(*s),
 			Value::Pipe(s) => Self::Pipe(s.into()),
+			Value::Array(s) => Self::Array(s.into()),
 		}
 	}
 }
@@ -93,6 +95,7 @@ impl<'a> fmt::Display for TValue<'a> {
 			Self::String(s) => s.fmt(f),
 			Self::Integer(s) => s.fmt(f),
 			Self::Pipe(_) => f.write_str("<pipe>"),
+			Self::Array(s) => s.fmt(f),
 		}
 	}
 }
@@ -144,9 +147,12 @@ impl<'a> InValue<'a> {
 		}
 	}
 
+	/// Return the value.
+	///
+	/// This returns a reference to avoid some issues with lifetimes.
 	#[inline(always)]
-	pub fn value(&self) -> TValue<'a> {
-		self.value
+	pub fn value(&self) -> &TValue<'a> {
+		&self.value
 	}
 }
 
@@ -174,7 +180,14 @@ macro_rules! wrap_ffi {
 				debug_assert!(!argv.is_null());
 				debug_assert!(!outv.is_null());
 				debug_assert!(!inv.is_null());
-				$fn(from_raw_parts(argv, argc), from_raw_parts_mut(outv, outc), from_raw_parts(inv, inc))
+				let f = || $fn(from_raw_parts(argv, argc), from_raw_parts_mut(outv, outc), from_raw_parts(inv, inc));
+				if cfg!(feature = "catch_unwind") {
+					// EX_SOFTWARE is 70. Use -70 to indicate internal software in built-in
+					// function for now.
+					std::panic::catch_unwind(f).unwrap_or(-70)
+				} else {
+					f()
+				}
 			}
 		}
 	};
@@ -247,5 +260,102 @@ pub fn exec(args: &[TValue], out: &mut [OutValue<'_>], inv: &[InValue<'_>]) -> i
 	cmd.wait().unwrap().code().unwrap_or(-1).try_into().unwrap()
 }
 
+pub fn split(args: &[TValue], out: &mut [OutValue], inv: &[InValue<'_>]) -> isize {
+	let mut v = &b""[..];
+
+	let sep = match args {
+		[] => b"\n",
+		[s] => match s {
+			TValue::String(s) => s.as_ref(),
+			_ => todo!("non-string separators"),
+		},
+		_ => todo!("multiple separators"),
+	};
+
+	for i in inv {
+		match i.name() {
+			"" | "0" => {
+				v = match i.value() {
+					TValue::String(s) => &s,
+					v => todo!("split {:?}", v),
+				}
+			}
+			_ => return -1, // TODO print an error message
+		}
+	}
+
+	let mut out_index = None;
+	for (i, o) in out.iter().enumerate() {
+		match o.name() {
+			"" | "1" => out_index = Some(i),
+			_ => return -1, // TODO print an error message
+		}
+	}
+
+	let mut vec = Vec::new();
+
+	// This keeps the generic loop a little faster (and also is in itself faster)
+	// TODO consider splitting on UTF-8 chars instead of bytes
+	if sep == b"" {
+		vec.extend(v.chunks(1).map(|s| Value::String(s.into())));
+	} else {
+		// TODO this is far from optimal
+		let max = v.len().saturating_sub(sep.len());
+		let mut i @ mut start = 0;
+		while i <= max {
+			if &v[i..][..sep.len()] == sep {
+				vec.push(Value::String(v[start..i].into()));
+				i += sep.len();
+				start = i;
+			} else {
+				i += 1;
+			}
+		}
+		vec.push(Value::String(v[start..].into()));
+	}
+
+	let array = Array::from(vec);
+
+	if let Some(o) = out_index.map(|i| &mut out[i]) {
+		o.set_value(Value::Array(array));
+	} else {
+		println!("{}", array);
+	}
+
+	0
+}
+
 wrap_ffi!(pub ffi_print = print);
 wrap_ffi!(pub ffi_exec  = exec );
+wrap_ffi!(pub ffi_split = split);
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	#[test]
+	fn split() {
+		let s = ArcStr::from("this is a\nstring with\nlinebreaks");
+		let mut out = [OutValue {
+			name: NonNull::from(&0),
+			value: &mut Value::Nil,
+		}];
+		let inv = [InValue {
+			name: NonNull::from(&0),
+			value: TValue::String((&s).into()),
+		}];
+		assert_eq!(super::split(&[], &mut out, &inv), 0);
+		match &out[0].value {
+			Value::Array(a) => {
+				assert_eq!(a.len(), 3);
+				for (x, y) in a.iter().zip(&["this is a", "string with", "linebreaks"]) {
+					match x {
+						Value::String(x) => assert_eq!(&**x, y.as_bytes()),
+						x => panic!("expected string, got {:?}", x),
+					}
+				}
+			}
+			v => panic!("expected array, got {:?}", v),
+		}
+	}
+}

@@ -14,6 +14,11 @@ use std::alloc::{alloc, dealloc};
 #[repr(transparent)]
 pub struct ArcStr(ArcArray<u8>);
 
+impl ArcStr {
+	// For internal use only
+	pub(super) const EMPTY: Self = Self(ArcArray::EMPTY);
+}
+
 impl From<&[u8]> for ArcStr {
 	#[inline(always)]
 	fn from(s: &[u8]) -> Self {

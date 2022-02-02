@@ -8,7 +8,7 @@ pub use array::{Array, TArray};
 pub use pipe::{Pipe, TPipe};
 
 use core::fmt;
-use core::mem;
+use core::mem::{self, ManuallyDrop};
 use core::ptr::NonNull;
 use core::slice;
 use core::str;
@@ -33,20 +33,15 @@ pub enum Value {
 }
 
 impl Value {
-	#[inline(always)]
-	pub const fn string_discriminant() -> ValueDiscriminant {
-		const V: Value = Value::Integer(0);
-		V.discriminant()
-	}
+	pub const NIL_DISCRIMINANT: ValueDiscriminant = Value::Nil.discriminant();
+	pub const STRING_DISCRIMINANT: ValueDiscriminant = Value::String(ArcStr::EMPTY).discriminant();
+	pub const INTEGER_DISCRIMINANT: ValueDiscriminant = Value::Integer(0).discriminant();
+	pub const ARRAY_DISCRIMINANT: ValueDiscriminant = Value::Array(Array::EMPTY).discriminant();
 
-	#[inline(always)]
-	pub const fn integer_discriminant() -> ValueDiscriminant {
-		const V: Value = Value::Integer(0);
-		V.discriminant()
-	}
-
-	const fn discriminant(&self) -> ValueDiscriminant {
-		unsafe { mem::transmute::<_, ValueDiscriminant>(mem::discriminant(self)) }
+	const fn discriminant(self) -> ValueDiscriminant {
+		let d = unsafe { mem::transmute::<_, ValueDiscriminant>(mem::discriminant(&self)) };
+		mem::forget(self);
+		d
 	}
 }
 
@@ -185,7 +180,14 @@ macro_rules! wrap_ffi {
 				debug_assert!(!argv.is_null());
 				debug_assert!(!outv.is_null());
 				debug_assert!(!inv.is_null());
-				$fn(from_raw_parts(argv, argc), from_raw_parts_mut(outv, outc), from_raw_parts(inv, inc))
+				let f = || $fn(from_raw_parts(argv, argc), from_raw_parts_mut(outv, outc), from_raw_parts(inv, inc));
+				if cfg!(feature = "catch_unwind") {
+					// EX_SOFTWARE is 70. Use -70 to indicate internal software in built-in
+					// function for now.
+					std::panic::catch_unwind(f).unwrap_or(-70)
+				} else {
+					f()
+				}
 			}
 		}
 	};
@@ -275,7 +277,7 @@ pub fn split(args: &[TValue], out: &mut [OutValue], inv: &[InValue<'_>]) -> isiz
 			"" | "0" => {
 				v = match i.value() {
 					TValue::String(s) => &s,
-					_ => todo!(),
+					v => todo!("split {:?}", v),
 				}
 			}
 			_ => return -1, // TODO print an error message
@@ -290,20 +292,28 @@ pub fn split(args: &[TValue], out: &mut [OutValue], inv: &[InValue<'_>]) -> isiz
 		}
 	}
 
-	// TODO this is far from optimal
-	let max = v.len().saturating_sub(sep.len());
-	let mut i @ mut start = 0;
 	let mut vec = Vec::new();
-	while i <= max {
-		if &v[i..][..sep.len()] == sep {
-			vec.push(Value::String(v[start..i].into()));
-			i += sep.len();
-			start = i;
-		} else {
-			i += 1;
+
+	// This keeps the generic loop a little faster (and also is in itself faster)
+	// TODO consider splitting on UTF-8 chars instead of bytes
+	if sep == b"" {
+		vec.extend(v.chunks(1).map(|s| Value::String(s.into())));
+	} else {
+		// TODO this is far from optimal
+		let max = v.len().saturating_sub(sep.len());
+		let mut i @ mut start = 0;
+		while i <= max {
+			if &v[i..][..sep.len()] == sep {
+				vec.push(Value::String(v[start..i].into()));
+				i += sep.len();
+				start = i;
+			} else {
+				i += 1;
+			}
 		}
+		vec.push(Value::String(v[start..].into()));
 	}
-	vec.push(Value::String(v[start..].into()));
+
 	let array = Array::from(vec);
 
 	if let Some(o) = out_index.map(|i| &mut out[i]) {

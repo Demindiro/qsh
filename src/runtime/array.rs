@@ -18,6 +18,11 @@ use std::sync::{Mutex, MutexGuard};
 #[repr(transparent)]
 pub struct Array(ArcArray<Value>);
 
+impl Array {
+	// For internal use only
+	pub(super) const EMPTY: Self = Self(ArcArray::EMPTY);
+}
+
 impl From<&[Value]> for Array {
 	#[inline]
 	fn from(s: &[Value]) -> Self {

@@ -19,3 +19,7 @@ split <
 split < >
 
 print splitted: @
+
+for a in @
+	if test -n @a
+		print ">" @a

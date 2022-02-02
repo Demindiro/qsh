@@ -24,6 +24,14 @@ pub(crate) struct ArcArray<T> {
 }
 
 impl<T> ArcArray<T> {
+	// For internal use only, as this may cause UB if used improperly.
+	// inner may *never* be dereferenced.
+	pub(super) const EMPTY: Self = Self {
+		// This is valid, yet referencing a const is bad because the const becomes dangling?
+		inner: NonNull::dangling(),
+		_marker: PhantomData,
+	};
+
 	#[inline]
 	fn layout(len: usize) -> Layout {
 		Layout::new::<ArcArrayInner<T>>()

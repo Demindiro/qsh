@@ -1,6 +1,8 @@
 #![feature(const_discriminant)]
+#![feature(const_refs_to_cell)]
 #![feature(core_intrinsics)]
 #![feature(if_let_guard)]
+#![feature(iter_intersperse)]
 #![feature(trusted_len)]
 
 mod jit;

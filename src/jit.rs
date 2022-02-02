@@ -374,9 +374,11 @@ where
 					if_true,
 					if_false,
 				} => {
-					assert!(self.retval_defined);
 					match condition {
-						Expression::Variable(s) if &*s == "?" => self.comment("if @?"),
+						Expression::Variable(s) if &*s == "?" => {
+							assert!(self.retval_defined);
+							self.comment("if @?")
+						}
 						Expression::Statement(c) => {
 							self.comment("if <statement>");
 							self.compile(c)

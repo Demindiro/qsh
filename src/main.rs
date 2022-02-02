@@ -1,4 +1,5 @@
 #![feature(const_discriminant)]
+#![feature(core_intrinsics)]
 #![feature(if_let_guard)]
 
 mod jit;

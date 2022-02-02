@@ -1,3 +1,4 @@
+mod arc_array;
 mod arc_str;
 mod pipe;
 

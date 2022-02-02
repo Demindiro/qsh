@@ -57,7 +57,7 @@ impl fmt::Display for Value {
 			Self::String(s) => s.fmt(f),
 			Self::Integer(s) => s.fmt(f),
 			Self::Pipe(_) => f.write_str("<pipe>"),
-			Self::Array(s) => fmt::Debug::fmt(s, f),
+			Self::Array(s) => s.fmt(f),
 		}
 	}
 }
@@ -100,7 +100,7 @@ impl<'a> fmt::Display for TValue<'a> {
 			Self::String(s) => s.fmt(f),
 			Self::Integer(s) => s.fmt(f),
 			Self::Pipe(_) => f.write_str("<pipe>"),
-			Self::Array(s) => fmt::Debug::fmt(s, f),
+			Self::Array(s) => s.fmt(f),
 		}
 	}
 }
@@ -152,9 +152,12 @@ impl<'a> InValue<'a> {
 		}
 	}
 
+	/// Return the value.
+	///
+	/// This returns a reference to avoid some issues with lifetimes.
 	#[inline(always)]
-	pub fn value(&self) -> TValue<'a> {
-		self.value
+	pub fn value(&self) -> &TValue<'a> {
+		&self.value
 	}
 }
 
@@ -255,5 +258,94 @@ pub fn exec(args: &[TValue], out: &mut [OutValue<'_>], inv: &[InValue<'_>]) -> i
 	cmd.wait().unwrap().code().unwrap_or(-1).try_into().unwrap()
 }
 
+pub fn split(args: &[TValue], out: &mut [OutValue], inv: &[InValue<'_>]) -> isize {
+	let mut v = &b""[..];
+
+	let sep = match args {
+		[] => b"\n",
+		[s] => match s {
+			TValue::String(s) => s.as_ref(),
+			_ => todo!("non-string separators"),
+		},
+		_ => todo!("multiple separators"),
+	};
+
+	for i in inv {
+		match i.name() {
+			"" | "0" => {
+				v = match i.value() {
+					TValue::String(s) => &s,
+					_ => todo!(),
+				}
+			}
+			_ => return -1, // TODO print an error message
+		}
+	}
+
+	let mut out_index = None;
+	for (i, o) in out.iter().enumerate() {
+		match o.name() {
+			"" | "1" => out_index = Some(i),
+			_ => return -1, // TODO print an error message
+		}
+	}
+
+	// TODO this is far from optimal
+	let max = v.len().saturating_sub(sep.len());
+	let mut i @ mut start = 0;
+	let mut vec = Vec::new();
+	while i <= max {
+		if &v[i..][..sep.len()] == sep {
+			vec.push(Value::String(v[start..i].into()));
+			i += sep.len();
+			start = i;
+		} else {
+			i += 1;
+		}
+	}
+	vec.push(Value::String(v[start..].into()));
+	let array = Array::from(vec);
+
+	if let Some(o) = out_index.map(|i| &mut out[i]) {
+		o.set_value(Value::Array(array));
+	} else {
+		println!("{}", array);
+	}
+
+	0
+}
+
 wrap_ffi!(pub ffi_print = print);
 wrap_ffi!(pub ffi_exec  = exec );
+wrap_ffi!(pub ffi_split = split);
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	#[test]
+	fn split() {
+		let s = ArcStr::from("this is a\nstring with\nlinebreaks");
+		let mut out = [OutValue {
+			name: NonNull::from(&0),
+			value: &mut Value::Nil,
+		}];
+		let inv = [InValue {
+			name: NonNull::from(&0),
+			value: TValue::String((&s).into()),
+		}];
+		assert_eq!(super::split(&[], &mut out, &inv), 0);
+		match &out[0].value {
+			Value::Array(a) => {
+				assert_eq!(a.len(), 3);
+				for (x, y) in a.iter().zip(&["this is a", "string with", "linebreaks"]) {
+					match x {
+						Value::String(x) => assert_eq!(&**x, y.as_bytes()),
+						x => panic!("expected string, got {:?}", x),
+					}
+				}
+			}
+			v => panic!("expected array, got {:?}", v),
+		}
+	}
+}

@@ -2,8 +2,8 @@ use super::{
 	arc_array::{ArcArray, TArcArray},
 	Value,
 };
-use core::fmt;
 use core::alloc::Layout;
+use core::fmt;
 use core::marker::PhantomData;
 use core::ops::Deref;
 use core::ptr::NonNull;
@@ -19,9 +19,9 @@ use std::sync::{Mutex, MutexGuard};
 pub struct Array(ArcArray<Value>);
 
 impl From<&[Value]> for Array {
-	#[inline(always)]
+	#[inline]
 	fn from(s: &[Value]) -> Self {
-		Self(s.into())
+		Self(s.iter().cloned().into())
 	}
 }
 
@@ -31,7 +31,15 @@ where
 {
 	#[inline(always)]
 	fn from(s: &R) -> Self {
-		Self(s.as_ref().into())
+		s.as_ref().into()
+	}
+}
+
+impl From<Vec<Value>> for Array {
+	#[inline]
+	fn from(s: Vec<Value>) -> Self {
+		let len = s.len();
+		Self(s.into_iter().take(len).into())
 	}
 }
 
@@ -54,6 +62,12 @@ impl Deref for Array {
 impl fmt::Debug for Array {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		self.0.fmt(f)
+	}
+}
+
+impl fmt::Display for Array {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		fmt_display(self.as_ref(), f)
 	}
 }
 
@@ -99,4 +113,21 @@ impl<'a> fmt::Debug for TArray<'a> {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		self.0.fmt(f)
 	}
+}
+
+impl<'a> fmt::Display for TArray<'a> {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		fmt_display(self.as_ref(), f)
+	}
+}
+
+fn fmt_display(a: &[Value], f: &mut fmt::Formatter) -> fmt::Result {
+	use fmt::Display;
+	f.write_str("[ ")?;
+	for (i, e) in a.into_iter().enumerate() {
+		f.write_str("\"")?;
+		e.to_string().escape_default().fmt(f)?;
+		f.write_str("\" ")?;
+	}
+	f.write_str("]")
 }

@@ -17,7 +17,7 @@ pub struct ArcStr(ArcArray<u8>);
 impl From<&[u8]> for ArcStr {
 	#[inline(always)]
 	fn from(s: &[u8]) -> Self {
-		Self(s.into())
+		Self(s.iter().copied().into())
 	}
 }
 
@@ -27,7 +27,7 @@ where
 {
 	#[inline(always)]
 	fn from(s: &R) -> Self {
-		Self(s.as_ref().into())
+		s.as_ref().into()
 	}
 }
 
@@ -73,7 +73,7 @@ impl fmt::Display for ArcStr {
 #[repr(transparent)]
 pub struct TArcStr<'a>(TArcArray<'a, u8>);
 
-impl TArcStr<'_> {
+impl<'a> TArcStr<'a> {
 	/// Increase the reference count and take ownership of the string.
 	#[inline]
 	pub fn upgrade(self) -> ArcStr {

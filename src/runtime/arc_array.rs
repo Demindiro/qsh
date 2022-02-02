@@ -1,4 +1,6 @@
+use super::Value;
 use core::alloc::Layout;
+use core::iter::TrustedLen;
 use core::marker::PhantomData;
 use core::ops::Deref;
 use core::ptr::{self, NonNull};
@@ -91,21 +93,21 @@ impl<T> Drop for ArcArray<T> {
 	}
 }
 
-impl<T> From<&[T]> for ArcArray<T>
+impl<T, I> From<I> for ArcArray<T>
 where
-	T: Clone,
+	I: Iterator<Item = T> + TrustedLen,
 {
-	#[inline]
-	fn from(s: &[T]) -> Self {
+	#[inline(always)]
+	fn from(iter: I) -> Self {
 		unsafe {
-			let inner = alloc(Self::layout(s.len())).cast::<ArcArrayInner<T>>();
+			let inner = alloc(Self::layout(iter.size_hint().0)).cast::<ArcArrayInner<T>>();
 			inner.write(ArcArrayInner {
-				size: s.len(),
+				size: iter.size_hint().0,
 				refcount: AtomicUsize::new(0),
 				buffer: [],
 			});
-			for (i, e) in s.iter().enumerate() {
-				ptr::write(inner.add(1).cast::<T>().add(i), e.clone());
+			for (i, e) in iter.enumerate() {
+				ptr::write(inner.add(1).cast::<T>().add(i), e);
 			}
 			Self {
 				inner: NonNull::new_unchecked(inner),
@@ -144,10 +146,7 @@ pub(crate) struct TArcArray<'a, T> {
 	_marker: PhantomData<&'a ArcArray<T>>,
 }
 
-impl<'a, T> Copy for TArcArray<'a, T>
-where
-	T: Clone,
-{}
+impl<'a, T> Copy for TArcArray<'a, T> where T: Clone {}
 
 impl<'a, T> From<&'a ArcArray<T>> for TArcArray<'a, T> {
 	#[inline]

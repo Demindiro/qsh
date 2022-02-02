@@ -13,3 +13,9 @@ if @?; print "success (grep)"
 
 print Runtime source files:
 print @
+
+split <
+
+split < >
+
+print splitted: @

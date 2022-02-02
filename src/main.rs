@@ -1,6 +1,7 @@
 #![feature(const_discriminant)]
 #![feature(core_intrinsics)]
 #![feature(if_let_guard)]
+#![feature(trusted_len)]
 
 mod jit;
 mod op;
@@ -20,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let f = jit::compile(f, |f| match f {
 		"print" => Some(runtime::ffi_print),
 		"exec" => Some(runtime::ffi_exec),
+		"split" => Some(runtime::ffi_split),
 		_ => None,
 	});
 	dbg!(&f);

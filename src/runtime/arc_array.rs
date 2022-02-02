@@ -138,11 +138,16 @@ impl<T> Deref for ArcArray<T> {
 /// A temporary reference to an [`ArcArray`].
 ///
 /// This type avoids an extra indirection while still maintaining lifetime invariants.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct TArcArray<'a, T> {
 	inner: NonNull<ArcArrayInner<T>>,
 	_marker: PhantomData<&'a ArcArray<T>>,
 }
+
+impl<'a, T> Copy for TArcArray<'a, T>
+where
+	T: Clone,
+{}
 
 impl<'a, T> From<&'a ArcArray<T>> for TArcArray<'a, T> {
 	#[inline]

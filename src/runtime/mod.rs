@@ -1,8 +1,10 @@
 mod arc_array;
 mod arc_str;
+mod array;
 mod pipe;
 
 pub use arc_str::{ArcStr, TArcStr};
+pub use array::{Array, TArray};
 pub use pipe::{Pipe, TPipe};
 
 use core::fmt;
@@ -27,6 +29,7 @@ pub enum Value {
 	String(ArcStr),
 	Integer(isize),
 	Pipe(Pipe),
+	Array(Array),
 }
 
 impl Value {
@@ -54,6 +57,7 @@ impl fmt::Display for Value {
 			Self::String(s) => s.fmt(f),
 			Self::Integer(s) => s.fmt(f),
 			Self::Pipe(_) => f.write_str("<pipe>"),
+			Self::Array(s) => fmt::Debug::fmt(s, f),
 		}
 	}
 }
@@ -64,6 +68,7 @@ pub enum TValue<'a> {
 	String(TArcStr<'a>),
 	Integer(isize),
 	Pipe(TPipe<'a>),
+	Array(TArray<'a>),
 }
 
 const fn _check(v: &Value, t: &TValue) -> u8 {
@@ -83,6 +88,7 @@ impl<'a> From<&'a Value> for TValue<'a> {
 			Value::String(s) => Self::String(s.into()),
 			Value::Integer(s) => Self::Integer(*s),
 			Value::Pipe(s) => Self::Pipe(s.into()),
+			Value::Array(s) => Self::Array(s.into()),
 		}
 	}
 }
@@ -94,6 +100,7 @@ impl<'a> fmt::Display for TValue<'a> {
 			Self::String(s) => s.fmt(f),
 			Self::Integer(s) => s.fmt(f),
 			Self::Pipe(_) => f.write_str("<pipe>"),
+			Self::Array(s) => fmt::Debug::fmt(s, f),
 		}
 	}
 }

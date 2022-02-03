@@ -15,7 +15,7 @@ pub enum Op<'a> {
 		if_false: Box<[Self]>,
 	},
 	While {
-		condition: Box<[Self]>,
+		condition: Expression<'a>,
 		while_true: Box<[Self]>,
 	},
 	For {
@@ -111,7 +111,13 @@ fn parse_while<'a, I>(tokens: &mut Peekable<I>) -> Result<Op<'a>, ParseError>
 where
 	I: Iterator<Item = Token<'a>>,
 {
-	todo!("while")
+	Ok(Op::While {
+		condition: parse_expr(tokens)?,
+		while_true: match parse_expr(tokens)? {
+			Expression::Statement(c) => c,
+			_ => [].into(), // TODO
+		},
+	})
 }
 
 /// Parse an "expression", i.e. `if <expr>`, `for v in <expr>`, ..
@@ -363,6 +369,32 @@ mod test {
 					.into(),
 					if_false: [].into(),
 				}]
+				.into(),
+			},]
+		);
+	}
+
+	#[test]
+	fn while_loop() {
+		let s = "while true; print y";
+		assert_eq!(
+			&*parse(TokenParser::new(s).map(Result::unwrap)).unwrap(),
+			[Op::While {
+				condition: Expression::Statement(
+					[Op::Call {
+						function: "true",
+						arguments: [].into(),
+						pipe_in: [].into(),
+						pipe_out: [].into()
+					}]
+					.into()
+				),
+				while_true: [Op::Call {
+					function: "print",
+					arguments: [Expression::String("y".into())].into(),
+					pipe_in: [].into(),
+					pipe_out: [].into(),
+				},]
 				.into(),
 			},]
 		);

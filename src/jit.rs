@@ -1,4 +1,4 @@
-use crate::op::{Expression, Op, ForRange};
+use crate::op::{Expression, ForRange, Op};
 use crate::runtime::*;
 use core::fmt;
 use core::mem;
@@ -193,8 +193,10 @@ where
 		);
 		#[cfg(feature = "iced")]
 		for i in 0..self.strings.len() {
-			self.symbols
-				.insert(strings_offset.0 + i, Vec::from([format!("strings+{}", i).into()]));
+			self.symbols.insert(
+				strings_offset.0 + i,
+				Vec::from([format!("strings+{}", i).into()]),
+			);
 		}
 		self.jit.extend(self.strings);
 		Function {
@@ -295,7 +297,8 @@ where
 						None
 					};
 					#[cfg(feature = "iced")]
-					self.symbols.entry(f as usize)
+					self.symbols
+						.entry(f as usize)
 						.or_default()
 						.push(push_fn_name.then(|| "exec").unwrap_or(function).into());
 
@@ -444,7 +447,6 @@ where
 								// There's also pipes, but idk how to handle them.
 								// Use ud2 as guard
 								; ud2
-								; jne >if_false
 							);
 						}
 						Expression::Statement(c) => {
@@ -535,6 +537,87 @@ where
 
 					self.loop_depth -= 1;
 				}
+				Op::While {
+					condition,
+					while_true,
+				} => {
+					// Put condition at end of body so we have 1 branch per iteration
+					// instead of 2.
+					dynasm!(self.jit
+						;; self.comment("while")
+						; jmp >while_test
+						;; self.symbol("while_true")
+						; while_true:
+						;; self.compile(while_true)
+						;; self.symbol("while_test")
+						; while_test:
+					);
+					// FIXME
+					self.loop_depth += 1;
+					// TODO don't just copy paste the code for If you lazy bastard.
+					match condition {
+						Expression::Variable(s) if &*s == "?" => {
+							assert!(self.retval_defined);
+							dynasm!(self.jit
+								;; self.comment("if @?")
+								; test rax, rax
+								; je >while_true
+							);
+						}
+						Expression::Variable(s) => {
+							self.comment(format!("if @{}", s));
+							let offt = self.variable_offset(s).unwrap();
+							let offt = i32::try_from(self.stack_offset).unwrap() + offt;
+							dynasm!(self.jit
+								; mov rax, [rsp + offt + 0]
+								// Test if *not* nil
+								;; self.comment("test nil")
+								; cmp rax, Value::NIL_DISCRIMINANT.try_into().unwrap()
+								; je >while_end
+								;; self.comment("load value")
+								; mov rdx, [rsp + offt + 8]
+								// Test if integer is 0
+								;; self.comment("test int")
+								; cmp rax, Value::INTEGER_DISCRIMINANT.try_into().unwrap()
+								; jne >if_not_int
+								; test rdx, rdx
+								; je <while_true
+								; jmp >while_end
+								; if_not_int:
+								// Test if array or string is *not* empty
+								// Arrays and strings both have len at the same position
+								;; self.comment("test string")
+								; cmp rax, Value::STRING_DISCRIMINANT.try_into().unwrap()
+								; je >if_string
+								;; self.comment("test array")
+								; cmp rax, Value::ARRAY_DISCRIMINANT.try_into().unwrap()
+								; jne >if_not_array
+								; if_string:
+								; mov rdx, [rdx + 8]
+								; test rdx, rdx
+								; jne <while_true
+								; jmp >while_end
+								; if_not_array:
+								// There's also pipes, but idk how to handle them.
+								// Use ud2 as guard
+								; ud2
+								;; self.symbol("while_end")
+								; while_end:
+							);
+						}
+						Expression::Statement(c) => {
+							dynasm!(self.jit
+								;; self.comment("while <statement>")
+								;; self.compile(c)
+								;; self.comment("skip if not 0")
+								; test rax, rax
+								; je <while_true
+							);
+						}
+						c => todo!("condition {:?}", c),
+					}
+					self.loop_depth -= 1;
+				}
 				Op::Assign {
 					variable,
 					expression,
@@ -571,7 +654,11 @@ where
 	}
 
 	fn variable_offset(&self, variable: &str) -> Option<i32> {
-		Some(((self.variables.len() - self.variables.get(variable)? - 1) * 16).try_into().unwrap())
+		Some(
+			((self.variables.len() - self.variables.get(variable)? - 1) * 16)
+				.try_into()
+				.unwrap(),
+		)
 	}
 
 	fn push_stack(&mut self, v: i64) -> usize {
@@ -620,10 +707,15 @@ mod test {
 
 	thread_local! {
 		static OUT: RefCell<String> = RefCell::default();
+		static COUNTER: RefCell<usize> = RefCell::default();
 	}
 
 	fn print(args: &[TValue], out: &mut [OutValue<'_>], inv: &[InValue<'_>]) -> isize {
-		let it = args.iter().map(|v| v.to_string().chars().collect::<Vec<_>>()).intersperse_with(|| Vec::from([' '])).flatten();
+		let it = args
+			.iter()
+			.map(|v| v.to_string().chars().collect::<Vec<_>>())
+			.intersperse_with(|| Vec::from([' ']))
+			.flatten();
 		for o in out {
 			match o.name() {
 				"" | "1" => {
@@ -687,11 +779,21 @@ mod test {
 		code
 	}
 
+	fn count_to_10(_: &[TValue], _: &mut [OutValue<'_>], _: &[InValue<'_>]) -> isize {
+		COUNTER.with(|c| {
+			let mut c = c.borrow_mut();
+			*c += 1;
+			(*c > 10).then(|| 1).unwrap_or(0)
+		})
+	}
+
 	wrap_ffi!(ffi_print = print);
 	wrap_ffi!(ffi_exec = exec);
+	wrap_ffi!(ffi_count_to_10 = count_to_10);
 
 	fn clear_out() {
-		OUT.with(|out| out.borrow_mut().clear())
+		OUT.with(|out| out.borrow_mut().clear());
+		COUNTER.with(|c| *c.borrow_mut() = 0);
 	}
 
 	fn resolve_fn(f: &str) -> Option<QFunction> {
@@ -699,6 +801,7 @@ mod test {
 			"print" => Some(ffi_print),
 			"exec" => Some(ffi_exec),
 			"split" => Some(ffi_split),
+			"count_to_10" => Some(ffi_count_to_10),
 			_ => None,
 		}
 	}
@@ -775,5 +878,11 @@ mod test {
 	fn for_if_loop() {
 		run("printf abcde\\n >; split < >; for a in @; if test -n @a; print @a");
 		OUT.with(|out| assert_eq!("abcde\n", &*out.borrow()));
+	}
+
+	#[test]
+	fn while_loop() {
+		run("while count_to_10; print y");
+		OUT.with(|out| assert_eq!("y\ny\ny\ny\ny\ny\ny\ny\ny\ny\n", &*out.borrow()));
 	}
 }

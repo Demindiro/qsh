@@ -315,7 +315,6 @@ where
 							let v = match a {
 								Expression::String(s) => Value::String((&*s).into()),
 								Expression::Variable(v) => {
-									dbg!("var", &v);
 									let offt = self.variables.len() - self.variables[&v] - 1;
 									let offt = (offt * 16 + stack_bytes + 8).try_into().unwrap();
 									dynasm!(self.jit
@@ -328,7 +327,6 @@ where
 								_ => todo!("argument {:?}", a),
 							};
 							stack_bytes += self.push_stack_value((&v).into());
-							dbg!("str", &v);
 							self.data.push(v);
 						}
 						if let Some([a, b]) = fn_str_val {
@@ -403,32 +401,75 @@ where
 					match condition {
 						Expression::Variable(s) if &*s == "?" => {
 							assert!(self.retval_defined);
-							self.comment("if @?")
+							dynasm!(self.jit
+								;; self.comment("if @?")
+								; test rax, rax
+								; jne >if_false
+							);
+						}
+						Expression::Variable(s) => {
+							self.comment(format!("if @{}", s));
+							let offt = self.variable_offset(s).unwrap();
+							let offt = i32::try_from(self.stack_offset).unwrap() + offt;
+							dynasm!(self.jit
+								; mov rax, [rsp + offt + 0]
+								// Test if *not* nil
+								;; self.comment("test nil")
+								; cmp rax, Value::NIL_DISCRIMINANT.try_into().unwrap()
+								; je >if_false
+								;; self.comment("load value")
+								; mov rdx, [rsp + offt + 8]
+								// Test if integer is 0
+								;; self.comment("test int")
+								; cmp rax, Value::INTEGER_DISCRIMINANT.try_into().unwrap()
+								; jne >if_not_int
+								; test rdx, rdx
+								; je >if_true
+								; jmp >if_false
+								; if_not_int:
+								// Test if array or string is *not* empty
+								// Arrays and strings both have len at the same position
+								;; self.comment("test string")
+								; cmp rax, Value::STRING_DISCRIMINANT.try_into().unwrap()
+								; je >if_string
+								;; self.comment("test array")
+								; cmp rax, Value::ARRAY_DISCRIMINANT.try_into().unwrap()
+								; jne >if_not_array
+								; if_string:
+								; mov rdx, [rdx + 8]
+								; test rdx, rdx
+								; jne >if_true
+								; jmp >if_false
+								; if_not_array:
+								// There's also pipes, but idk how to handle them.
+								// Use ud2 as guard
+								; ud2
+								; jne >if_false
+							);
 						}
 						Expression::Statement(c) => {
-							self.comment("if <statement>");
-							self.compile(c)
+							dynasm!(self.jit
+								;; self.comment("if <statement>")
+								;; self.compile(c)
+								;; self.comment("skip if not 0")
+								; test rax, rax
+								; jne >if_false
+							);
 						}
 						c => todo!("condition {:?}", c),
 					}
 					dynasm!(self.jit
-						;; self.comment("skip if not 0")
-						; test rax, rax
-						// FIXME 1-byte jumps may not always be possible.
-						// Some sort of rollback mechanism if it fails would be useful.
-						// UncommittedModifier may be usable for this purpose.
-						; jne BYTE >if_false
+						;; self.symbol("if_end")
+						; if_true:
+						;; self.compile(if_true)
 					);
-					self.compile(if_true);
 					if if_false.len() > 0 {
 						dynasm!(self.jit
-							; jmp >if_true
+							; jmp >if_end
 							; if_false:
-						);
-						self.compile(if_false);
-						dynasm!(self.jit
-							;; self.symbol("if_true")
-							; if_true:
+							;; self.compile(if_false)
+							;; self.symbol("if_end")
+							; if_end:
 						);
 					} else {
 						dynasm!(self.jit

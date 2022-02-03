@@ -885,4 +885,10 @@ mod test {
 		run("while count_to_10; print y");
 		OUT.with(|out| assert_eq!("y\ny\ny\ny\ny\ny\ny\ny\ny\ny\n", &*out.borrow()));
 	}
+
+	#[test]
+	fn block() {
+		run("@y = kek; if true; (print x; print @y; false); if @?; print z");
+		OUT.with(|out| assert_eq!("x\nkek\n", &*out.borrow()));
+	}
 }

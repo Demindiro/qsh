@@ -1,10 +1,11 @@
 use core::iter::Peekable;
+use core::mem;
 use core::str::CharIndices;
 
 #[derive(Debug, PartialEq)]
 pub enum Token<'a> {
-	ScopeOpen,
-	ScopeClose,
+	BlockOpen,
+	BlockClose,
 	Word(&'a str),
 	String(&'a str),
 	Variable(&'a str),
@@ -22,19 +23,63 @@ pub struct TokenParser<'a> {
 	/// The iterator over the parsed string.
 	iter: Peekable<CharIndices<'a>>,
 	/// Queue of tokens to be returned.
-	queue: Option<Token<'a>>,
+	queue: Queue<'a>,
 	/// Whether the last returned token was a separator
 	last_was_separator: bool,
 }
 
 #[derive(Debug)]
 pub enum TokenError {
-	UnclosedScope,
-	UnexpectedCloseScope,
+	UnclosedBlock,
+	UnexpectedCloseBlock,
 	UnterminatedString,
 	NoNameVariable,
 	NoDigits,
 	InvalidDigit,
+}
+
+/// A queue of tokens to be returned
+enum Queue<'a> {
+	None,
+	One(Token<'a>),
+	Two(Token<'a>, Token<'a>),
+	Three(Token<'a>, Token<'a>, Token<'a>),
+}
+
+impl<'a> Queue<'a> {
+	/// Pop an item from the queue.
+	fn pop(&mut self) -> Option<Token<'a>> {
+		let t;
+		(*self, t) = match mem::replace(self, Self::None) {
+			Self::None => (Self::None, None),
+			Self::One(t) => (Self::None, Some(t)),
+			Self::Two(t, u) => (Self::One(u), Some(t)),
+			Self::Three(t, u, v) => (Self::Two(u, v), Some(t)),
+		};
+		t
+	}
+
+	/// Enqueue an array of tokens.
+	///
+	/// # Panics
+	///
+	/// The queue isn't empty.
+	///
+	/// There are more items than the queue can hold.
+	fn push<const N: usize>(&mut self, mut tokens: [Token<'a>; N]) {
+		if let Self::None = self {
+			let mut f = |i| mem::replace(&mut tokens[i], Token::Separator);
+			*self = match N {
+				0 => Self::None,
+				1 => Self::One(f(0)),
+				2 => Self::Two(f(0), f(1)),
+				3 => Self::Three(f(0), f(1), f(2)),
+				_ => panic!("more items than the queue can hold"),
+			};
+		} else {
+			panic!("the queue isn't empty");
+		}
+	}
 }
 
 impl<'a> TokenParser<'a> {
@@ -44,21 +89,13 @@ impl<'a> TokenParser<'a> {
 			s,
 			start: 0,
 			iter: s.char_indices().peekable(),
-			queue: None,
+			queue: Queue::None,
 			last_was_separator: true, // Filter redundant separators at the start
 		}
 	}
-}
 
-impl<'a> Iterator for TokenParser<'a> {
-	type Item = Result<Token<'a>, TokenError>;
-
-	fn next(&mut self) -> Option<Self::Item> {
-		if let Some(t) = self.queue.take() {
-			self.last_was_separator = t == Token::Separator;
-			return Some(Ok(t));
-		}
-
+	/// Try to pop & transform a token from the queue.
+	fn pop(&mut self) -> Option<Token<'a>> {
 		let f = |t| {
 			match t {
 				Token::Word(s) if s == "" => None,
@@ -74,29 +111,55 @@ impl<'a> Iterator for TokenParser<'a> {
 			}
 		};
 
+		while let Some(t) = self.queue.pop() {
+			if let Some(t) = f(t) {
+				self.last_was_separator = t == Token::Separator;
+				return Some(t);
+			}
+		}
+
+		None
+	}
+
+	/// Enqueue an array of tokens.
+	///
+	/// # Panics
+	///
+	/// See [`Queue::push`].
+	fn push<const N: usize>(&mut self, tokens: [Token<'a>; N]) {
+		self.queue.push(tokens)
+	}
+}
+
+impl<'a> Iterator for TokenParser<'a> {
+	type Item = Result<Token<'a>, TokenError>;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		if let Some(t) = self.pop() {
+			return Some(Ok(t));
+		}
+
 		while let Some((i, c)) = self.iter.next() {
-			let t = match c {
+			let () = match c {
 				'#' => {
 					while let Some((_, c)) = self.iter.next() {
 						if c == '\n' {
 							break;
 						}
 					}
-					f(Token::Separator)
+					self.push([Token::Separator]);
 				}
-				';' | '\n' => {
-					let a = f(Token::Word(&self.s[self.start..i]));
-					let b = f(Token::Separator);
-					if a.is_some() && b.is_some() {
-						self.queue = b;
-						a
-					} else {
-						a.or(b)
-					}
+				';' | '\n' => self.push([Token::Word(&self.s[self.start..i]), Token::Separator]),
+				' ' | '\t' => self.push([Token::Word(&self.s[self.start..i])]),
+				'(' => self.push([Token::Word(&self.s[self.start..i]), Token::BlockOpen]),
+				')' => {
+					// Put a separator before the block close to simplify things.
+					self.push([
+						Token::Word(&self.s[self.start..i]),
+						Token::Separator,
+						Token::BlockClose,
+					])
 				}
-				' ' | '\t' => f(Token::Word(&self.s[self.start..i])),
-				'{' => f(Token::ScopeOpen),
-				'}' => f(Token::ScopeClose),
 				'$' => {
 					let (radix, skip) = match self.iter.peek() {
 						Some((_, 'b')) => (2, true),
@@ -122,7 +185,7 @@ impl<'a> Iterator for TokenParser<'a> {
 						};
 					}
 					match n {
-						Some(n) => f(Token::Integer(n)),
+						Some(n) => self.push([Token::Integer(n)]),
 						None => return Some(Err(TokenError::NoDigits)),
 					}
 				}
@@ -136,19 +199,29 @@ impl<'a> Iterator for TokenParser<'a> {
 							_ => (),
 						}
 					}
-					f(Token::String(&self.s[i + 1..j]))
+					self.push([Token::String(&self.s[i + 1..j])]);
 				}
 				_ => continue,
 			};
 			self.start = self.iter.peek().unwrap_or(&(self.s.len(), ' ')).0;
-			if let Some(t) = t {
-				self.last_was_separator = t == Token::Separator;
+
+			if let Some(t) = self.pop() {
 				return Some(Ok(t));
 			}
 		}
-		let t = f(Token::Word(&self.s[self.start..]));
-		self.start = self.s.len();
-		t.map(Ok)
+
+		// We're at the end of the source file.
+		self.push([Token::Word(&self.s[self.start..])]);
+		if let Some(t) = self.pop() {
+			self.start = self.s.len();
+			Some(Ok(t))
+		} else if !self.last_was_separator {
+			// Always end with a separator to simplify things.
+			self.last_was_separator = true;
+			Some(Ok(Token::Separator))
+		} else {
+			None
+		}
 	}
 }
 
@@ -164,7 +237,7 @@ mod test {
 	#[test]
 	fn test() {
 		let s = "
-print beep booop   baap {cat /etc/passwd }
+print beep booop   baap (cat /etc/passwd)
 
 print quack
 
@@ -184,10 +257,11 @@ if @error != \"\"
 			Token::Word("beep"),
 			Token::Word("booop"),
 			Token::Word("baap"),
-			Token::ScopeOpen,
+			Token::BlockOpen,
 			Token::Word("cat"),
 			Token::Word("/etc/passwd"),
-			Token::ScopeClose,
+			Token::Separator,
+			Token::BlockClose,
 			Token::Separator,
 			Token::Word("print"),
 			Token::Word("quack"),
@@ -241,6 +315,20 @@ print \"Don't ignore me!\" # Do ignore this though
 		let t = [
 			Token::Word("print"),
 			Token::String("Don't ignore me!"),
+			Token::Separator,
+		];
+		cmp(s, &t);
+	}
+
+	#[test]
+	fn block() {
+		let s = "(cat a)";
+		let t = [
+			Token::BlockOpen,
+			Token::Word("cat"),
+			Token::Word("a"),
+			Token::Separator,
+			Token::BlockClose,
 			Token::Separator,
 		];
 		cmp(s, &t);

@@ -52,8 +52,8 @@ where
 	I: Iterator<Item = Token<'a>>,
 {
 	match tokens.next().unwrap() {
-		Token::ScopeOpen => todo!("scope open"),
-		Token::ScopeClose => todo!("scope close"),
+		Token::BlockOpen => todo!("scope open"),
+		Token::BlockClose => todo!("scope close"),
 		Token::Word(s) => Ok(Expression::String(s.into())),
 		Token::String(s) => {
 			// TODO unescape
@@ -126,8 +126,10 @@ where
 	I: Iterator<Item = Token<'a>>,
 {
 	match tokens.next().expect("todo") {
-		Token::ScopeOpen => todo!("scope open"),
-		Token::ScopeClose => todo!("scope close"),
+		Token::BlockOpen => Ok(Expression::Statement(
+			parse_inner(Default::default(), tokens, true)?.into(),
+		)),
+		Token::BlockClose => todo!("scope close"),
 		Token::Word("if") => Ok(Expression::Statement([parse_if(tokens)?].into())),
 		Token::Word("for") => Ok(Expression::Statement([parse_for(tokens)?].into())),
 		Token::Word("while") => Ok(Expression::Statement([parse_while(tokens)?].into())),
@@ -167,13 +169,13 @@ fn parse_inner<'a>(
 	in_scope: bool,
 ) -> Result<Vec<Op<'a>>, ParseError> {
 	while let Some(tk) = tokens.next() {
-		let next_is_close = tokens.peek().map_or(true, |t| t == &Token::ScopeClose);
+		let next_is_close = tokens.peek().map_or(true, |t| t == &Token::BlockClose);
 		match tk {
-			Token::ScopeOpen => ops = parse_inner(ops, tokens, true)?,
-			Token::ScopeClose => {
+			Token::BlockOpen => ops = parse_inner(ops, tokens, true)?,
+			Token::BlockClose => {
 				return in_scope
 					.then(|| ops.into())
-					.ok_or(ParseError::CloseScopeWithoutOpen);
+					.ok_or(ParseError::CloseBlockWithoutOpen);
 			}
 			Token::Word("if") => ops.push(parse_if(tokens)?),
 			Token::Word("for") => ops.push(parse_for(tokens)?),
@@ -184,8 +186,8 @@ fn parse_inner<'a>(
 				let mut pipe_in = Vec::new();
 				while tokens.peek().map_or(false, |t| t != &Token::Separator) {
 					match tokens.next().unwrap() {
-						Token::ScopeOpen => todo!("scope open"),
-						Token::ScopeClose => todo!("scope close"),
+						Token::BlockOpen => todo!("scope open"),
+						Token::BlockClose => todo!("scope close"),
 						Token::Word(s) => args.push(Expression::String(s.into())),
 						Token::String(s) => {
 							// TODO unescape
@@ -222,13 +224,13 @@ fn parse_inner<'a>(
 	}
 	(!in_scope)
 		.then(|| ops.into())
-		.ok_or(ParseError::UnclosedScope)
+		.ok_or(ParseError::UnclosedBlock)
 }
 
 #[derive(Debug)]
 pub enum ParseError {
-	CloseScopeWithoutOpen,
-	UnclosedScope,
+	CloseBlockWithoutOpen,
+	UnclosedBlock,
 	ExpectedVariable,
 	ExpectedIn,
 }
@@ -396,6 +398,41 @@ mod test {
 					pipe_out: [].into(),
 				},]
 				.into(),
+			},]
+		);
+	}
+
+	#[test]
+	fn block() {
+		let s = "if true; (print x; print @y)";
+		assert_eq!(
+			&*parse(TokenParser::new(s).map(Result::unwrap)).unwrap(),
+			[Op::If {
+				condition: Expression::Statement(
+					[Op::Call {
+						function: "true",
+						arguments: [].into(),
+						pipe_in: [].into(),
+						pipe_out: [].into()
+					}]
+					.into()
+				),
+				if_true: [
+					Op::Call {
+						function: "print",
+						arguments: [Expression::String("x".into())].into(),
+						pipe_in: [].into(),
+						pipe_out: [].into(),
+					},
+					Op::Call {
+						function: "print",
+						arguments: [Expression::Variable("y")].into(),
+						pipe_in: [].into(),
+						pipe_out: [].into(),
+					},
+				]
+				.into(),
+				if_false: [].into(),
 			},]
 		);
 	}

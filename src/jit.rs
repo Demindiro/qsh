@@ -2,7 +2,9 @@ use crate::op::{Expression, ForRange, Op};
 use crate::runtime::*;
 use core::fmt;
 use core::mem;
-use dynasmrt::{dynasm, AssemblyOffset, DynasmApi, DynasmLabelApi, ExecutableBuffer};
+#[cfg(target_arch = "x86_64")]
+use dynasmrt::x64;
+use dynasmrt::{dynasm, AssemblyOffset, DynasmApi, DynasmLabelApi, ExecutableBuffer, Register};
 use std::collections::{btree_map::Entry, BTreeMap};
 use std::rc::Rc;
 
@@ -112,7 +114,7 @@ fn compile_x64<F>(ops: Box<[Op]>, resolve_fn: F) -> Function
 where
 	F: Fn(&str) -> Option<QFunction>,
 {
-	let mut jit = X64Compiler::new(resolve_fn);
+	let mut jit = X64Compiler::new(resolve_fn, &ops);
 	jit.compile(ops);
 	jit.finish()
 }
@@ -132,9 +134,7 @@ where
 	symbols: BTreeMap<usize, Vec<Box<str>>>,
 	#[cfg(feature = "iced")]
 	comments: BTreeMap<usize, String>,
-	// FIXME hack to prevent allocations inside loops
-	loop_depth: usize,
-	stack_offset: usize,
+	stack_offset: i32,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -142,8 +142,8 @@ impl<'a, F> X64Compiler<'a, F>
 where
 	F: Fn(&str) -> Option<QFunction>,
 {
-	fn new(resolve_fn: F) -> Self {
-		Self {
+	fn new(resolve_fn: F, ops: &[Op<'a>]) -> Self {
+		let mut s = Self {
 			jit: dynasmrt::x64::Assembler::new().unwrap(),
 			data: Default::default(),
 			resolve_fn,
@@ -154,20 +154,96 @@ where
 			symbols: Default::default(),
 			#[cfg(feature = "iced")]
 			comments: Default::default(),
-			loop_depth: 0,
 			stack_offset: 0,
+		};
+		s.collect_vars(ops);
+		let l = (s.variables.len() * 16).try_into().unwrap();
+		dynasm!(s.jit
+			; mov ecx, l
+			; xor eax, eax
+			; sub rsp, rcx
+			; mov rdi, rsp
+			; rep stosb
+		);
+		s
+	}
+
+	/// Reserve storage for variables.
+	///
+	/// This must be called once in [`Self::new`].
+	fn collect_vars(&mut self, ops: &[Op<'a>]) {
+		for op in ops {
+			match op {
+				Op::Call {
+					arguments,
+					pipe_in,
+					pipe_out,
+					..
+				} => {
+					arguments.iter().for_each(|a| self.collect_vars_expr(a));
+					pipe_in.iter().for_each(|(from, _)| self.reserve_var(from));
+					pipe_out.iter().for_each(|(_, to)| self.reserve_var(to));
+				}
+				Op::If {
+					condition,
+					if_true,
+					if_false,
+				} => {
+					self.collect_vars_expr(condition);
+					self.collect_vars(if_true);
+					self.collect_vars(if_false);
+				}
+				Op::While {
+					condition,
+					while_true,
+				} => {
+					self.collect_vars_expr(condition);
+					self.collect_vars(while_true);
+				}
+				Op::For {
+					variable,
+					range,
+					for_each,
+				} => {
+					self.reserve_var(variable);
+					match range {
+						ForRange::Variable(v) => self.reserve_var(v),
+					}
+					self.collect_vars(for_each);
+				}
+				Op::Assign {
+					variable,
+					expression,
+				} => {
+					self.reserve_var(variable);
+					self.collect_vars_expr(expression);
+				}
+			}
 		}
+	}
+
+	/// Reserve storage for variables in an expression.
+	fn collect_vars_expr(&mut self, expr: &Expression<'a>) {
+		match expr {
+			Expression::Variable(v) => self.reserve_var(v),
+			Expression::Statement(o) => self.collect_vars(o),
+			Expression::String(_) | Expression::Integer(_) => (),
+		}
+	}
+
+	/// Reserve storage for a variable if it hasn't any yet.
+	fn reserve_var(&mut self, var: &'a str) {
+		let l = self.variables.len();
+		self.variables.entry(var).or_insert(l);
 	}
 
 	fn finish(mut self) -> Function {
 		assert_eq!(self.stack_offset, 0, "stack is not properly restored");
-		self.comment("return");
-		match self.variables.len() * 16 {
-			8 => dynasm!(self.jit ; pop rdi),
-			l if let Ok(l) = l.try_into() => dynasm!(self.jit ; add rsp, BYTE l),
-			l => dynasm!(self.jit ; add rsp, l.try_into().unwrap()),
-		}
-		dynasm!(self.jit ; ret);
+		dynasm!(self.jit
+			;; self.comment("return")
+			; add rsp, (self.variables.len() * 16) as i32
+			; ret
+		);
 
 		// Add data
 		let data_offset = self.jit.offset();
@@ -225,14 +301,10 @@ where
 						.or_else(|| (self.resolve_fn)("exec").map(|f| (f, true)))
 						.expect("'exec' not defined");
 
-					// Reserve space for out values (if they don't exist yet)
-					for (from, to) in pipe_out.iter() {
-						self.set_variable((&**to).into(), None);
-					}
+					// TODO should we clear pipe_out values before a call?
 
-					// How much the stack has grown in bytes.
-					// Used for calculating offsets to variables.
-					let mut stack_bytes = self.stack_offset;
+					// The original stack offset, used to restore the stack.
+					let original_stack_offset = self.stack_offset;
 
 					// Create out list
 					self.comment("out pipes");
@@ -242,8 +314,7 @@ where
 						let str_offt = self.strings.len();
 						self.strings.push(from.len().try_into().unwrap());
 						self.strings.extend(from.bytes());
-						let offt = self.variable_offset(to).unwrap();
-						let offt = offt.checked_add(stack_bytes.try_into().unwrap()).unwrap();
+						let offt = self.variable_offset(to);
 						dynasm!(self.jit
 							// value pointer
 							; lea rax, [rsp + offt]
@@ -252,7 +323,7 @@ where
 							; lea rax, [>strings + str_offt.try_into().unwrap()]
 							; push rax
 						);
-						stack_bytes += 16;
+						self.stack_offset += 16;
 					}
 					dynasm!(self.jit
 						; mov edx, BYTE len
@@ -267,8 +338,7 @@ where
 						let str_offt = self.strings.len();
 						self.strings.push(to.len().try_into().unwrap());
 						self.strings.extend(to.bytes());
-						let offt = self.variable_offset(from).unwrap();
-						let offt = offt + i32::try_from(stack_bytes + 8).unwrap();
+						let offt = self.variable_offset(from).checked_add(8).unwrap();
 						dynasm!(self.jit
 							// value
 							; push QWORD [rsp + offt]
@@ -278,7 +348,7 @@ where
 							; lea rax, [>strings + str_offt.try_into().unwrap()]
 							; push rax
 						);
-						stack_bytes += 24;
+						self.stack_offset += 24;
 					}
 					dynasm!(self.jit
 						; mov r8, len
@@ -318,18 +388,19 @@ where
 							let v = match a {
 								Expression::String(s) => Value::String((&*s).into()),
 								Expression::Variable(v) => {
-									let offt = self.variables.len() - self.variables[&v] - 1;
-									let offt = (offt * 16 + stack_bytes + 8).try_into().unwrap();
+									let offt = self.variable_offset(v);
+									// push decrements rsp before storing
+									let offt = offt.checked_add(8).unwrap();
 									dynasm!(self.jit
 										; push QWORD [rsp + offt]
 										; push QWORD [rsp + offt]
 									);
-									stack_bytes += 16;
+									self.stack_offset += 16;
 									continue;
 								}
 								_ => todo!("argument {:?}", a),
 							};
-							stack_bytes += self.push_stack_value((&v).into());
+							self.stack_offset += self.push_stack_value((&v).into());
 							self.data.push(v);
 						}
 						if let Some([a, b]) = fn_str_val {
@@ -339,7 +410,7 @@ where
 								; mov rax, QWORD a
 								; push rax
 							);
-							stack_bytes += 16;
+							self.stack_offset += 16;
 						}
 						if let Ok(n) = len.try_into() {
 							dynasm!(self.jit ; mov edi, DWORD n);
@@ -361,13 +432,8 @@ where
 							};
 							self.data.push(v);
 						}
-						if let Ok(n) = len.try_into() {
-							dynasm!(self.jit ; mov edi, DWORD n);
-						} else {
-							dynasm!(self.jit ; mov rdi, len.try_into().unwrap())
-						}
-
 						dynasm!(self.jit
+							; mov rdi, len.try_into().unwrap()
 							; lea rsi, [>data + (i * 16).try_into().unwrap()]
 						);
 					}
@@ -376,22 +442,23 @@ where
 					// Note that we didn't align the stack at the start of the function,
 					// so offset by 8
 					self.comment("call");
-					(stack_bytes % 16 != 8).then(|| dynasm!(self.jit ; push rbx));
-					//(self.stack_offset > 0).then(|| dynasm!(self.jit; ud2));
+					if self.stack_offset % 16 != 8 {
+						dynasm!(self.jit ; push rbx);
+						self.stack_offset += 8;
+					}
 					dynasm!(self.jit
 						; mov rax, QWORD f as _
 						; call rax
 					);
-					//(self.stack_offset > 0).then(|| dynasm!(self.jit; ud2));
-					(stack_bytes % 16 != 8).then(|| dynasm!(self.jit ; pop rbx));
 
 					// Restore stack
-					stack_bytes -= self.stack_offset;
-					if let Ok(n) = stack_bytes.try_into() {
+					let offset = self.stack_offset - original_stack_offset;
+					if let Ok(n) = offset.try_into() {
 						dynasm!(self.jit ; add rsp, BYTE n);
 					} else {
-						dynasm!(self.jit ; add rsp, stack_bytes.try_into().unwrap())
+						dynasm!(self.jit ; add rsp, offset);
 					}
+					self.stack_offset = original_stack_offset;
 
 					// @? is now useable
 					self.retval_defined = true;
@@ -401,25 +468,28 @@ where
 					if_true,
 					if_false,
 				} => {
+					let if_true_lbl = self.jit.new_dynamic_label();
+					let if_false_lbl = self.jit.new_dynamic_label();
+					let if_end = self.jit.new_dynamic_label();
+
 					match condition {
 						Expression::Variable(s) if &*s == "?" => {
 							assert!(self.retval_defined);
 							dynasm!(self.jit
 								;; self.comment("if @?")
 								; test rax, rax
-								; jne >if_false
+								; jne =>if_false_lbl
 							);
 						}
 						Expression::Variable(s) => {
 							self.comment(format!("if @{}", s));
-							let offt = self.variable_offset(s).unwrap();
-							let offt = i32::try_from(self.stack_offset).unwrap() + offt;
 							dynasm!(self.jit
+								;; let offt = self.variable_offset(s)
 								; mov rax, [rsp + offt + 0]
 								// Test if *not* nil
 								;; self.comment("test nil")
 								; cmp rax, Value::NIL_DISCRIMINANT.try_into().unwrap()
-								; je >if_false
+								; je =>if_false_lbl
 								;; self.comment("load value")
 								; mov rdx, [rsp + offt + 8]
 								// Test if integer is 0
@@ -427,8 +497,8 @@ where
 								; cmp rax, Value::INTEGER_DISCRIMINANT.try_into().unwrap()
 								; jne >if_not_int
 								; test rdx, rdx
-								; je >if_true
-								; jmp >if_false
+								; je =>if_true_lbl
+								; jmp =>if_false_lbl
 								; if_not_int:
 								// Test if array or string is *not* empty
 								// Arrays and strings both have len at the same position
@@ -441,8 +511,8 @@ where
 								; if_string:
 								; mov rdx, [rdx + 8]
 								; test rdx, rdx
-								; jne >if_true
-								; jmp >if_false
+								; jne =>if_true_lbl
+								; jmp =>if_false_lbl
 								; if_not_array:
 								// There's also pipes, but idk how to handle them.
 								// Use ud2 as guard
@@ -452,31 +522,36 @@ where
 						Expression::Statement(c) => {
 							dynasm!(self.jit
 								;; self.comment("if <statement>")
-								;; self.compile(c)
+							);
+							self.compile(c);
+							dynasm!(self.jit
 								;; self.comment("skip if not 0")
 								; test rax, rax
-								; jne >if_false
+								; jne =>if_false_lbl
 							);
 						}
 						c => todo!("condition {:?}", c),
 					}
 					dynasm!(self.jit
 						;; self.symbol("if_end")
-						; if_true:
-						;; self.compile(if_true)
+						; =>if_true_lbl
 					);
+					self.compile(if_true);
+
 					if if_false.len() > 0 {
 						dynasm!(self.jit
 							; jmp >if_end
-							; if_false:
-							;; self.compile(if_false)
+							; =>if_false_lbl
+						);
+						self.compile(if_false);
+						dynasm!(self.jit
 							;; self.symbol("if_end")
-							; if_end:
+							; =>if_end
 						);
 					} else {
 						dynasm!(self.jit
 							;; self.symbol("if_false")
-							; if_false:
+							; =>if_false_lbl
 						);
 					}
 				}
@@ -486,74 +561,90 @@ where
 					for_each,
 				} => {
 					self.comment("for");
-					self.set_variable(variable, None);
 					let range = match range {
 						ForRange::Variable(v) => v,
 					};
-					let range_offt = self.variable_offset(range).unwrap();
-					let var_offt = self.variable_offset(variable).unwrap();
 
-					// FIXME declaring new rangeiables in the loop will corrupt the stack
-					self.loop_depth += 1;
+					// Use dynamic labels as loops may be nested (and hence local labels will
+					// interfere with each other)
+					let for_end = self.jit.new_dynamic_label();
+					let for_array = self.jit.new_dynamic_label();
+					let for_array_check = self.jit.new_dynamic_label();
 
 					dynasm!(self.jit
 						;; self.comment("test if array")
+						;; let range_offt = self.variable_offset(range)
 						; mov rax, [rsp + range_offt]
 						; cmp rax, BYTE Value::ARRAY_DISCRIMINANT.try_into().unwrap()
 						;; self.comment("skip if not array")
-						; jne >for_end
+						; jne =>for_end
+
 						;; self.comment("save previous iteration or caller")
 						; push rbx
 						; push r12
 						;; self.stack_offset += 16
+						;; let range_offt = self.variable_offset(range)
+						;; let var_offt = self.variable_offset(variable)
+
 						;; self.comment("load array pointer")
-						; mov rbx, [i32::try_from(self.stack_offset).unwrap() + rsp + range_offt + 8]
+						; mov rbx, [rsp + range_offt + 8]
 						;; self.comment("calculate end address")
 						; mov r12, [rbx + 8]
 						; add r12, r12 // size * 2 (1 byte shorter than shl r12, 4)
 						; lea r12, [rbx + 16 + r12 * 8] // base + 16 + size * 16
 						;; self.comment("check if array is empty")
-						; jmp >for_array_check
+						; jmp =>for_array_check
+
 						;; self.symbol("for_array")
-						; for_array:
+						; =>for_array
 						;; self.comment(format!("load element into @{}", variable))
 						; mov rax, [rbx + 0]
 						; mov rdx, [rbx + 8]
-						; mov [i32::try_from(self.stack_offset).unwrap() + rsp + var_offt + 0], rax
-						; mov [i32::try_from(self.stack_offset).unwrap() + rsp + var_offt + 8], rdx
-						;; self.compile(for_each)
-						;; self.symbol("for_array_check")
-						; for_array_check:
-						; add rbx, 16
-						; cmp rbx, r12
-						; jne <for_array
-						;; self.comment("restore previous iteration or caller")
-						;; self.stack_offset -= 16
-						; pop r12
-						; pop rbx
-						;; self.symbol("for_end")
-						; for_end:
+						; mov [rsp + var_offt + 0], rax
+						; mov [rsp + var_offt + 8], rdx
 					);
 
-					self.loop_depth -= 1;
+					self.compile(for_each);
+
+					dynasm!(self.jit
+
+						;; self.symbol("for_array_check")
+						; =>for_array_check
+						; add rbx, 16
+						; cmp rbx, r12
+						; jne =>for_array
+
+						;; self.comment("restore previous iteration or caller")
+						; pop r12
+						; pop rbx
+						;; self.stack_offset -= 16
+						;; self.symbol("for_end")
+						; =>for_end
+					);
 				}
 				Op::While {
 					condition,
 					while_true,
 				} => {
+					let while_true_lbl = self.jit.new_dynamic_label();
+					let while_test = self.jit.new_dynamic_label();
+
 					// Put condition at end of body so we have 1 branch per iteration
 					// instead of 2.
 					dynasm!(self.jit
 						;; self.comment("while")
-						; jmp >while_test
+						; jmp =>while_test
 						;; self.symbol("while_true")
-						; while_true:
-						;; self.compile(while_true)
-						;; self.symbol("while_test")
-						; while_test:
+						; =>while_true_lbl
 					);
-					// FIXME
-					self.loop_depth += 1;
+
+					self.compile(while_true);
+
+					dynasm!(self.jit
+						;; self.symbol("while_test")
+						; =>while_test
+					);
+
 					// TODO don't just copy paste the code for If you lazy bastard.
 					match condition {
 						Expression::Variable(s) if &*s == "?" => {
@@ -566,8 +657,7 @@ where
 						}
 						Expression::Variable(s) => {
 							self.comment(format!("if @{}", s));
-							let offt = self.variable_offset(s).unwrap();
-							let offt = i32::try_from(self.stack_offset).unwrap() + offt;
+							let offt = self.variable_offset(s);
 							dynasm!(self.jit
 								; mov rax, [rsp + offt + 0]
 								// Test if *not* nil
@@ -581,7 +671,7 @@ where
 								; cmp rax, Value::INTEGER_DISCRIMINANT.try_into().unwrap()
 								; jne >if_not_int
 								; test rdx, rdx
-								; je <while_true
+								; je =>while_true_lbl
 								; jmp >while_end
 								; if_not_int:
 								// Test if array or string is *not* empty
@@ -595,7 +685,7 @@ where
 								; if_string:
 								; mov rdx, [rdx + 8]
 								; test rdx, rdx
-								; jne <while_true
+								; jne =>while_true_lbl
 								; jmp >while_end
 								; if_not_array:
 								// There's also pipes, but idk how to handle them.
@@ -611,57 +701,72 @@ where
 								;; self.compile(c)
 								;; self.comment("skip if not 0")
 								; test rax, rax
-								; je <while_true
+								; je =>while_true_lbl
 							);
 						}
 						c => todo!("condition {:?}", c),
 					}
-					self.loop_depth -= 1;
 				}
 				Op::Assign {
 					variable,
 					expression,
 				} => {
 					self.comment(format!("@{} = {:?}", variable, expression));
-					self.set_variable(variable, Some(expression))
+					self.set_variable(variable, expression)
 				}
 				op => todo!("parse {:?}", op),
 			}
 		}
 	}
 
-	fn set_variable(&mut self, variable: &'a str, expression: Option<Expression>) {
-		let i = self.variables.len();
-		let mut vars = mem::take(&mut self.variables); // Avoid silly borrow errors
-		match vars.entry(variable) {
-			Entry::Vacant(e) => {
-				self.comment(format!("new variable @{}", variable));
-				assert_eq!(self.loop_depth, 0, "fix variable allocation in loops");
-				let v = match expression {
-					Some(Expression::String(s)) => Value::String((&*s).into()),
-					None => Value::Nil,
-					_ => todo!("assign {:?}", expression),
-				};
-				self.push_stack_value((&v).into());
-				self.data.push(v);
-				e.insert(i);
+	fn set_variable(&mut self, var: &'a str, expression: Expression) {
+		let val = match expression {
+			Expression::String(v) => Value::String((&*v).into()),
+			Expression::Integer(v) => Value::Integer(v.into()),
+			_ => todo!(),
+		};
+		let i = self.variable_offset(var);
+		// FIXME transmuting Value::Nil is technically UB because part of it is unitialized.
+		let [a, b] = unsafe { mem::transmute::<_, [i64; 2]>(val) };
+		self.mov_const(x64::Rq::RSP, i, a);
+		self.mov_const(x64::Rq::RSP, i.checked_add(8).unwrap(), b);
+	}
+
+	/// Get the current offset of a variable in bytes. This includes the stack offset.
+	fn variable_offset(&self, var: &'a str) -> i32 {
+		let offt = (self.variables[var] * 16)
+			.try_into()
+			.unwrap();
+		self.stack_offset.checked_add(offt).unwrap()
+	}
+
+	/// Move a constant to a memory location with the most optimal instruction(s).
+	///
+	/// It may use `rdi` as a scratch register if necessary.
+	fn mov_const(&mut self, reg: x64::Rq, offt: i32, val: i64) {
+		let reg = reg.code();
+		if let Ok(offt) = offt.try_into() {
+			if let Ok(val) = i32::try_from(val) {
+				dynasm!(self.jit ; mov QWORD [BYTE Rq(reg) + offt], DWORD val);
+			} else {
+				dynasm!(self.jit
+					; mov rdi, QWORD val
+					; mov [BYTE Rq(reg) + offt], rdi
+				);
 			}
-			Entry::Occupied(e) => {
-				expression.is_some().then(|| todo!("set occupied"));
+		} else {
+			if let Ok(val) = i32::try_from(val) {
+				dynasm!(self.jit ; mov QWORD [DWORD Rq(reg) + offt], DWORD val);
+			} else {
+				dynasm!(self.jit
+					; mov rdi, QWORD val
+					; mov [DWORD Rq(reg) + offt], rdi
+				);
 			}
 		}
-		self.variables = vars;
 	}
 
-	fn variable_offset(&self, variable: &str) -> Option<i32> {
-		Some(
-			((self.variables.len() - self.variables.get(variable)? - 1) * 16)
-				.try_into()
-				.unwrap(),
-		)
-	}
-
-	fn push_stack(&mut self, v: i64) -> usize {
+	fn push_stack(&mut self, v: i64) -> i32 {
 		match v {
 			v if let Ok(v) = v.try_into() => dynasm!(self.jit ; push BYTE v),
 			v if let Ok(v) = v.try_into() => dynasm!(self.jit ; push DWORD v),
@@ -670,7 +775,8 @@ where
 		8
 	}
 
-	fn push_stack_value(&mut self, v: TValue) -> usize {
+	fn push_stack_value(&mut self, v: TValue) -> i32 {
+		// FIXME transmuting Value::Nil is technically UB because part of it is unitialized.
 		let [a, b] = unsafe { mem::transmute::<_, [i64; 2]>(v) };
 		self.push_stack(b) + self.push_stack(a)
 	}
@@ -719,7 +825,7 @@ mod test {
 		for o in out {
 			match o.name() {
 				"" | "1" => {
-					let s = (&it.collect::<String>()).into();
+					let s = (&it.chain(['\n']).collect::<String>()).into();
 					o.set_value(Value::String(s));
 					return 0;
 				}
@@ -851,9 +957,33 @@ mod test {
 	}
 
 	#[test]
-	fn variable() {
+	fn assign_variable() {
+		run("@a = $42;");
+		OUT.with(|out| assert_eq!("", &*out.borrow()));
+	}
+
+	#[test]
+	fn assign_variable_2() {
+		run("@a = $42; @b = forty_two");
+		OUT.with(|out| assert_eq!("", &*out.borrow()));
+	}
+
+	#[test]
+	fn print_variable() {
+		run("@a = xyz; print @a");
+		OUT.with(|out| assert_eq!("xyz\n", &*out.borrow()));
+	}
+
+	#[test]
+	fn print_variable_2() {
 		run("@a = 5; @b = \"five\"; print @a is pronounced as @b");
 		OUT.with(|out| assert_eq!("5 is pronounced as five\n", &*out.borrow()));
+	}
+
+	#[test]
+	fn print_pipe_print() {
+		run("print abc > ; print @");
+		OUT.with(|out| assert_eq!("abc\n\n", &*out.borrow()));
 	}
 
 	#[test]
@@ -870,7 +1000,7 @@ mod test {
 
 	#[test]
 	fn for_loop() {
-		run("print abcde >; split \"\" < >; for a in @; print @a");
+		run("printf abcde >; split \"\" < >; for a in @; print @a");
 		OUT.with(|out| assert_eq!("a\nb\nc\nd\ne\n", &*out.borrow()));
 	}
 
@@ -878,6 +1008,18 @@ mod test {
 	fn for_if_loop() {
 		run("printf abcde\\n >; split < >; for a in @; if test -n @a; print @a");
 		OUT.with(|out| assert_eq!("abcde\n", &*out.borrow()));
+	}
+
+	#[test]
+	fn for_for_loop() {
+		run("@ = $0; for a in @; for b in @; print");
+		OUT.with(|out| assert_eq!("", &*out.borrow()));
+	}
+
+	#[test]
+	fn for_for_split_print() {
+		run("printf a.b/c.d >; split / < >; for a in @; (split . <a >a; for b in @a; print @b)");
+		OUT.with(|out| assert_eq!("a\nb\nc\nd\n", &*out.borrow()));
 	}
 
 	#[test]

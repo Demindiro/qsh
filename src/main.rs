@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		.map(Result::unwrap)
 		.collect::<Vec<_>>();
 	dbg!(&f);
-	let f = op::parse(f.into_iter()).unwrap();
+	let f = op::OpTree::new(f.into_iter()).unwrap();
 	dbg!(&f);
 	let f = jit::compile(f, |f| match f {
 		"print" => Some(runtime::ffi_print),

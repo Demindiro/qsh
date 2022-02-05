@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 dynasmrt = "*"
 iced-x86 = { optional = true, version = "*" }
+bitflags = "*"
 
 [features]
 default = ["iced", "catch_unwind"]

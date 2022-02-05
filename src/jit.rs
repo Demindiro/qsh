@@ -1,4 +1,4 @@
-use crate::op::{Expression, ForRange, Op};
+use crate::op::{self, Expression, ForRange, Op, OpTree, RegisterIndex};
 use crate::runtime::*;
 use core::fmt;
 use core::mem;
@@ -99,7 +99,7 @@ impl fmt::Debug for Function {
 }
 
 /// Compile an opcode tree to native machine-code.
-pub fn compile<F>(ops: Box<[Op]>, resolve_fn: F) -> Function
+pub fn compile<F>(ops: OpTree<'_>, resolve_fn: F) -> Function
 where
 	F: Fn(&str) -> Option<QFunction>,
 {
@@ -110,12 +110,12 @@ where
 }
 
 #[cfg(target_arch = "x86_64")]
-fn compile_x64<F>(ops: Box<[Op]>, resolve_fn: F) -> Function
+fn compile_x64<F>(ops: OpTree<'_>, resolve_fn: F) -> Function
 where
 	F: Fn(&str) -> Option<QFunction>,
 {
-	let mut jit = X64Compiler::new(resolve_fn, &ops);
-	jit.compile(ops);
+	let mut jit = X64Compiler::new(resolve_fn, ops.registers.into());
+	jit.compile(ops.ops);
 	jit.finish()
 }
 
@@ -127,7 +127,6 @@ where
 	jit: dynasmrt::x64::Assembler,
 	data: Vec<Value>,
 	resolve_fn: F,
-	variables: BTreeMap<&'a str, usize>,
 	strings: Vec<u8>,
 	retval_defined: bool,
 	#[cfg(feature = "iced")]
@@ -135,6 +134,7 @@ where
 	#[cfg(feature = "iced")]
 	comments: BTreeMap<usize, String>,
 	stack_offset: i32,
+	registers: Box<[op::Register<'a>]>,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -142,12 +142,11 @@ impl<'a, F> X64Compiler<'a, F>
 where
 	F: Fn(&str) -> Option<QFunction>,
 {
-	fn new(resolve_fn: F, ops: &[Op<'a>]) -> Self {
+	fn new(resolve_fn: F, registers: Box<[op::Register<'a>]>) -> Self {
 		let mut s = Self {
 			jit: dynasmrt::x64::Assembler::new().unwrap(),
 			data: Default::default(),
 			resolve_fn,
-			variables: Default::default(),
 			strings: Default::default(),
 			retval_defined: Default::default(),
 			#[cfg(feature = "iced")]
@@ -155,9 +154,9 @@ where
 			#[cfg(feature = "iced")]
 			comments: Default::default(),
 			stack_offset: 0,
+			registers,
 		};
-		s.collect_vars(ops);
-		let l = (s.variables.len() * 16).try_into().unwrap();
+		let l = (s.registers.len() * 16).try_into().unwrap();
 		dynasm!(s.jit
 			; mov ecx, l
 			; xor eax, eax
@@ -168,80 +167,11 @@ where
 		s
 	}
 
-	/// Reserve storage for variables.
-	///
-	/// This must be called once in [`Self::new`].
-	fn collect_vars(&mut self, ops: &[Op<'a>]) {
-		for op in ops {
-			match op {
-				Op::Call {
-					arguments,
-					pipe_in,
-					pipe_out,
-					..
-				} => {
-					arguments.iter().for_each(|a| self.collect_vars_expr(a));
-					pipe_in.iter().for_each(|(from, _)| self.reserve_var(from));
-					pipe_out.iter().for_each(|(_, to)| self.reserve_var(to));
-				}
-				Op::If {
-					condition,
-					if_true,
-					if_false,
-				} => {
-					self.collect_vars_expr(condition);
-					self.collect_vars(if_true);
-					self.collect_vars(if_false);
-				}
-				Op::While {
-					condition,
-					while_true,
-				} => {
-					self.collect_vars_expr(condition);
-					self.collect_vars(while_true);
-				}
-				Op::For {
-					variable,
-					range,
-					for_each,
-				} => {
-					self.reserve_var(variable);
-					match range {
-						ForRange::Variable(v) => self.reserve_var(v),
-					}
-					self.collect_vars(for_each);
-				}
-				Op::Assign {
-					variable,
-					expression,
-				} => {
-					self.reserve_var(variable);
-					self.collect_vars_expr(expression);
-				}
-			}
-		}
-	}
-
-	/// Reserve storage for variables in an expression.
-	fn collect_vars_expr(&mut self, expr: &Expression<'a>) {
-		match expr {
-			Expression::Variable(v) => self.reserve_var(v),
-			Expression::Statement(o) => self.collect_vars(o),
-			Expression::String(_) | Expression::Integer(_) => (),
-		}
-	}
-
-	/// Reserve storage for a variable if it hasn't any yet.
-	fn reserve_var(&mut self, var: &'a str) {
-		let l = self.variables.len();
-		self.variables.entry(var).or_insert(l);
-	}
-
 	fn finish(mut self) -> Function {
 		assert_eq!(self.stack_offset, 0, "stack is not properly restored");
 		dynasm!(self.jit
 			;; self.comment("return")
-			; add rsp, (self.variables.len() * 16) as i32
+			; add rsp, (self.registers.len() * 16) as i32
 			; ret
 		);
 
@@ -310,7 +240,7 @@ where
 					self.comment("out pipes");
 					let len = pipe_out.len().try_into().unwrap();
 					for (from, to) in pipe_out.into_vec() {
-						self.comment(format!("{} > @{}", from, to));
+						self.comment(format!("{} > @{}", from, self.reg_to_var(to)));
 						let str_offt = self.strings.len();
 						self.strings.push(from.len().try_into().unwrap());
 						self.strings.extend(from.bytes());
@@ -334,7 +264,7 @@ where
 					self.comment("in pipes");
 					let len = pipe_in.len().try_into().unwrap();
 					for (from, to) in pipe_in.into_vec() {
-						self.comment(format!("{} < @{}", to, from));
+						self.comment(format!("{} < @{}", to, self.reg_to_var(from)));
 						let str_offt = self.strings.len();
 						self.strings.push(to.len().try_into().unwrap());
 						self.strings.extend(to.bytes());
@@ -473,7 +403,8 @@ where
 					let if_end = self.jit.new_dynamic_label();
 
 					match condition {
-						Expression::Variable(s) if &*s == "?" => {
+						// TODO use an enum for special variables
+						Expression::Variable(s) if self.reg_to_var(s) == "?" => {
 							assert!(self.retval_defined);
 							dynasm!(self.jit
 								;; self.comment("if @?")
@@ -482,7 +413,7 @@ where
 							);
 						}
 						Expression::Variable(s) => {
-							self.comment(format!("if @{}", s));
+							self.comment(format!("if @{}", self.reg_to_var(s)));
 							dynasm!(self.jit
 								;; let offt = self.variable_offset(s)
 								; mov rax, [rsp + offt + 0]
@@ -597,7 +528,7 @@ where
 
 						;; self.symbol("for_array")
 						; =>for_array
-						;; self.comment(format!("load element into @{}", variable))
+						;; self.comment(format!("load element into @{}", self.reg_to_var(variable)))
 						; mov rax, [rbx + 0]
 						; mov rdx, [rbx + 8]
 						; mov [rsp + var_offt + 0], rax
@@ -647,7 +578,8 @@ where
 
 					// TODO don't just copy paste the code for If you lazy bastard.
 					match condition {
-						Expression::Variable(s) if &*s == "?" => {
+						// TODO use an enum for special variables
+						Expression::Variable(s) if self.reg_to_var(s) == "?" => {
 							assert!(self.retval_defined);
 							dynasm!(self.jit
 								;; self.comment("if @?")
@@ -656,7 +588,7 @@ where
 							);
 						}
 						Expression::Variable(s) => {
-							self.comment(format!("if @{}", s));
+							self.comment(format!("if @{}", self.reg_to_var(s)));
 							let offt = self.variable_offset(s);
 							dynasm!(self.jit
 								; mov rax, [rsp + offt + 0]
@@ -711,7 +643,7 @@ where
 					variable,
 					expression,
 				} => {
-					self.comment(format!("@{} = {:?}", variable, expression));
+					self.comment(format!("@{} = {:?}", self.reg_to_var(variable), expression));
 					self.set_variable(variable, expression)
 				}
 				op => todo!("parse {:?}", op),
@@ -719,7 +651,7 @@ where
 		}
 	}
 
-	fn set_variable(&mut self, var: &'a str, expression: Expression) {
+	fn set_variable(&mut self, var: RegisterIndex, expression: Expression) {
 		let val = match expression {
 			Expression::String(v) => Value::String((&*v).into()),
 			Expression::Integer(v) => Value::Integer(v.into()),
@@ -733,11 +665,8 @@ where
 	}
 
 	/// Get the current offset of a variable in bytes. This includes the stack offset.
-	fn variable_offset(&self, var: &'a str) -> i32 {
-		let offt = (self.variables[var] * 16)
-			.try_into()
-			.unwrap();
-		self.stack_offset.checked_add(offt).unwrap()
+	fn variable_offset(&self, var: RegisterIndex) -> i32 {
+		self.stack_offset + i32::from(var.0) * 16
 	}
 
 	/// Move a constant to a memory location with the most optimal instruction(s).
@@ -800,6 +729,11 @@ where
 			.entry(self.jit.offset().0)
 			.or_default()
 			.push(_s.into().into());
+	}
+
+	/// Map a register to a variable
+	fn reg_to_var(&self, reg: RegisterIndex) -> &'a str {
+		self.registers[usize::from(reg.0)].variable
 	}
 }
 
@@ -913,7 +847,7 @@ mod test {
 	}
 
 	fn compile(s: &str) -> Function {
-		let ops = parse(TokenParser::new(s).map(Result::unwrap)).unwrap();
+		let ops = OpTree::new(TokenParser::new(s).map(Result::unwrap)).unwrap();
 		super::compile(ops, resolve_fn)
 	}
 

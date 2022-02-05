@@ -108,6 +108,7 @@ dependencies = [
 name = "qsh"
 version = "0.1.0"
 dependencies = [
+ "bitflags",
  "dynasmrt",
  "iced-x86",
 ]

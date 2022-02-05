@@ -1,4 +1,5 @@
 use crate::op::{self, Expression, ForRange, Op, OpTree, RegisterIndex};
+use core::cell::Cell;
 use crate::runtime::*;
 use core::fmt;
 use core::mem;
@@ -27,8 +28,8 @@ impl Function {
 	}
 }
 
-#[cfg(feature = "iced")]
 impl fmt::Debug for Function {
+	#[cfg(feature = "iced")]
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		use iced_x86::{
 			Decoder, Formatter, FormatterTextKind, Instruction, IntelFormatter, SymResString,
@@ -96,6 +97,11 @@ impl fmt::Debug for Function {
 		}
 		Ok(())
 	}
+
+	#[cfg(not(feature = "iced"))]
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		f.debug_struct(stringify!(Function)).finish_non_exhaustive()
+	}
 }
 
 /// Compile an opcode tree to native machine-code.
@@ -132,7 +138,7 @@ where
 	#[cfg(feature = "iced")]
 	symbols: BTreeMap<usize, Vec<Box<str>>>,
 	#[cfg(feature = "iced")]
-	comments: BTreeMap<usize, String>,
+	comments: Cell<BTreeMap<usize, String>>,
 	stack_offset: i32,
 	registers: Box<[op::Register<'a>]>,
 }
@@ -170,7 +176,7 @@ where
 	fn finish(mut self) -> Function {
 		assert_eq!(self.stack_offset, 0, "stack is not properly restored");
 		dynasm!(self.jit
-			;; self.comment("return")
+			;; self.comment(|| "return")
 			; add rsp, (self.registers.len() * 16) as i32
 			; ret
 		);
@@ -211,7 +217,7 @@ where
 			#[cfg(feature = "iced")]
 			symbols: Rc::new(self.symbols),
 			#[cfg(feature = "iced")]
-			comments: self.comments,
+			comments: self.comments.take(),
 		}
 	}
 
@@ -224,7 +230,7 @@ where
 					pipe_out,
 					pipe_in,
 				} => {
-					self.comment(format!("call '{}'", &function));
+					self.comment(|| format!("call '{}'", &function));
 					// Resolve function or default to 'exec'
 					let (f, push_fn_name) = (self.resolve_fn)(&*function)
 						.map(|f| (f, false))
@@ -237,10 +243,10 @@ where
 					let original_stack_offset = self.stack_offset;
 
 					// Create out list
-					self.comment("out pipes");
+					self.comment(|| "out pipes");
 					let len = pipe_out.len().try_into().unwrap();
 					for (from, to) in pipe_out.into_vec() {
-						self.comment(format!("{} > @{}", from, self.reg_to_var(to)));
+						self.comment(|| format!("{} > @{}", from, self.reg_to_var(to)));
 						let str_offt = self.strings.len();
 						self.strings.push(from.len().try_into().unwrap());
 						self.strings.extend(from.bytes());
@@ -261,10 +267,10 @@ where
 					);
 
 					// Create in list
-					self.comment("in pipes");
+					self.comment(|| "in pipes");
 					let len = pipe_in.len().try_into().unwrap();
 					for (from, to) in pipe_in.into_vec() {
-						self.comment(format!("{} < @{}", to, self.reg_to_var(from)));
+						self.comment(|| format!("{} < @{}", to, self.reg_to_var(from)));
 						let str_offt = self.strings.len();
 						self.strings.push(to.len().try_into().unwrap());
 						self.strings.extend(to.bytes());
@@ -311,7 +317,7 @@ where
 
 					// Create argument list
 					if use_stack {
-						self.comment("dynamic args");
+						self.comment(|| "dynamic args");
 
 						// Note that stack pushing is top-down
 						for a in arguments.into_vec().into_iter().rev() {
@@ -351,7 +357,7 @@ where
 							; mov rsi, rsp
 						);
 					} else {
-						self.comment("constant args");
+						self.comment(|| "constant args");
 
 						// Push arguments
 						for a in arguments.into_vec() {
@@ -371,7 +377,7 @@ where
 					// Align stack to 16 bytes, then call
 					// Note that we didn't align the stack at the start of the function,
 					// so offset by 8
-					self.comment("call");
+					self.comment(|| "call");
 					if self.stack_offset % 16 != 8 {
 						dynasm!(self.jit ; push rbx);
 						self.stack_offset += 8;
@@ -407,24 +413,24 @@ where
 						Expression::Variable(s) if self.reg_to_var(s) == "?" => {
 							assert!(self.retval_defined);
 							dynasm!(self.jit
-								;; self.comment("if @?")
+								;; self.comment(|| "if @?")
 								; test rax, rax
 								; jne =>if_false_lbl
 							);
 						}
 						Expression::Variable(s) => {
-							self.comment(format!("if @{}", self.reg_to_var(s)));
+							self.comment(|| format!("if @{}", self.reg_to_var(s)));
 							dynasm!(self.jit
 								;; let offt = self.variable_offset(s)
 								; mov rax, [rsp + offt + 0]
 								// Test if *not* nil
-								;; self.comment("test nil")
+								;; self.comment(|| "test nil")
 								; cmp rax, Value::NIL_DISCRIMINANT.try_into().unwrap()
 								; je =>if_false_lbl
-								;; self.comment("load value")
+								;; self.comment(|| "load value")
 								; mov rdx, [rsp + offt + 8]
 								// Test if integer is 0
-								;; self.comment("test int")
+								;; self.comment(|| "test int")
 								; cmp rax, Value::INTEGER_DISCRIMINANT.try_into().unwrap()
 								; jne >if_not_int
 								; test rdx, rdx
@@ -433,10 +439,10 @@ where
 								; if_not_int:
 								// Test if array or string is *not* empty
 								// Arrays and strings both have len at the same position
-								;; self.comment("test string")
+								;; self.comment(|| "test string")
 								; cmp rax, Value::STRING_DISCRIMINANT.try_into().unwrap()
 								; je >if_string
-								;; self.comment("test array")
+								;; self.comment(|| "test array")
 								; cmp rax, Value::ARRAY_DISCRIMINANT.try_into().unwrap()
 								; jne >if_not_array
 								; if_string:
@@ -452,11 +458,11 @@ where
 						}
 						Expression::Statement(c) => {
 							dynasm!(self.jit
-								;; self.comment("if <statement>")
+								;; self.comment(|| "if <statement>")
 							);
 							self.compile(c);
 							dynasm!(self.jit
-								;; self.comment("skip if not 0")
+								;; self.comment(|| "skip if not 0")
 								; test rax, rax
 								; jne =>if_false_lbl
 							);
@@ -491,7 +497,7 @@ where
 					range,
 					for_each,
 				} => {
-					self.comment("for");
+					self.comment(|| "for");
 					let range = match range {
 						ForRange::Variable(v) => v,
 					};
@@ -503,32 +509,32 @@ where
 					let for_array_check = self.jit.new_dynamic_label();
 
 					dynasm!(self.jit
-						;; self.comment("test if array")
+						;; self.comment(|| "test if array")
 						;; let range_offt = self.variable_offset(range)
 						; mov rax, [rsp + range_offt]
 						; cmp rax, BYTE Value::ARRAY_DISCRIMINANT.try_into().unwrap()
-						;; self.comment("skip if not array")
+						;; self.comment(|| "skip if not array")
 						; jne =>for_end
 
-						;; self.comment("save previous iteration or caller")
+						;; self.comment(|| "save previous iteration or caller")
 						; push rbx
 						; push r12
 						;; self.stack_offset += 16
 						;; let range_offt = self.variable_offset(range)
 						;; let var_offt = self.variable_offset(variable)
 
-						;; self.comment("load array pointer")
+						;; self.comment(|| "load array pointer")
 						; mov rbx, [rsp + range_offt + 8]
-						;; self.comment("calculate end address")
+						;; self.comment(|| "calculate end address")
 						; mov r12, [rbx + 8]
 						; add r12, r12 // size * 2 (1 byte shorter than shl r12, 4)
 						; lea r12, [rbx + 16 + r12 * 8] // base + 16 + size * 16
-						;; self.comment("check if array is empty")
+						;; self.comment(|| "check if array is empty")
 						; jmp =>for_array_check
 
 						;; self.symbol("for_array")
 						; =>for_array
-						;; self.comment(format!("load element into @{}", self.reg_to_var(variable)))
+						;; self.comment(|| format!("load element into @{}", self.reg_to_var(variable)))
 						; mov rax, [rbx + 0]
 						; mov rdx, [rbx + 8]
 						; mov [rsp + var_offt + 0], rax
@@ -545,7 +551,7 @@ where
 						; cmp rbx, r12
 						; jne =>for_array
 
-						;; self.comment("restore previous iteration or caller")
+						;; self.comment(|| "restore previous iteration or caller")
 						; pop r12
 						; pop rbx
 						;; self.stack_offset -= 16
@@ -563,7 +569,7 @@ where
 					// Put condition at end of body so we have 1 branch per iteration
 					// instead of 2.
 					dynasm!(self.jit
-						;; self.comment("while")
+						;; self.comment(|| "while")
 						; jmp =>while_test
 						;; self.symbol("while_true")
 						; =>while_true_lbl
@@ -582,24 +588,24 @@ where
 						Expression::Variable(s) if self.reg_to_var(s) == "?" => {
 							assert!(self.retval_defined);
 							dynasm!(self.jit
-								;; self.comment("if @?")
+								;; self.comment(|| "if @?")
 								; test rax, rax
 								; je >while_true
 							);
 						}
 						Expression::Variable(s) => {
-							self.comment(format!("if @{}", self.reg_to_var(s)));
+							self.comment(|| format!("if @{}", self.reg_to_var(s)));
 							let offt = self.variable_offset(s);
 							dynasm!(self.jit
 								; mov rax, [rsp + offt + 0]
 								// Test if *not* nil
-								;; self.comment("test nil")
+								;; self.comment(|| "test nil")
 								; cmp rax, Value::NIL_DISCRIMINANT.try_into().unwrap()
 								; je >while_end
-								;; self.comment("load value")
+								;; self.comment(|| "load value")
 								; mov rdx, [rsp + offt + 8]
 								// Test if integer is 0
-								;; self.comment("test int")
+								;; self.comment(|| "test int")
 								; cmp rax, Value::INTEGER_DISCRIMINANT.try_into().unwrap()
 								; jne >if_not_int
 								; test rdx, rdx
@@ -608,10 +614,10 @@ where
 								; if_not_int:
 								// Test if array or string is *not* empty
 								// Arrays and strings both have len at the same position
-								;; self.comment("test string")
+								;; self.comment(|| "test string")
 								; cmp rax, Value::STRING_DISCRIMINANT.try_into().unwrap()
 								; je >if_string
-								;; self.comment("test array")
+								;; self.comment(|| "test array")
 								; cmp rax, Value::ARRAY_DISCRIMINANT.try_into().unwrap()
 								; jne >if_not_array
 								; if_string:
@@ -629,9 +635,9 @@ where
 						}
 						Expression::Statement(c) => {
 							dynasm!(self.jit
-								;; self.comment("while <statement>")
+								;; self.comment(|| "while <statement>")
 								;; self.compile(c)
-								;; self.comment("skip if not 0")
+								;; self.comment(|| "skip if not 0")
 								; test rax, rax
 								; je =>while_true_lbl
 							);
@@ -643,7 +649,7 @@ where
 					variable,
 					expression,
 				} => {
-					self.comment(format!("@{} = {:?}", self.reg_to_var(variable), expression));
+					self.comment(|| format!("@{} = {:?}", self.reg_to_var(variable), expression));
 					self.set_variable(variable, expression)
 				}
 				op => todo!("parse {:?}", op),
@@ -710,16 +716,25 @@ where
 		self.push_stack(b) + self.push_stack(a)
 	}
 
-	fn comment(&mut self, comment: impl AsRef<str> + Into<String>) {
-		let _c = comment.as_ref();
+	// Non-mutable to avoid borrow errors in trivial cases.
+	fn comment<R>(&self, comment: impl FnOnce() -> R)
+	where
+		R: AsRef<str> + Into<String>
+	{
+		let _c = comment;
 		#[cfg(feature = "iced")]
-		self.comments
-			.entry(self.jit.offset().0)
-			.and_modify(|s| {
-				*s += ", ";
-				*s += _c;
-			})
-			.or_insert_with(|| comment.into());
+		{
+			let mut v = self.comments.take();
+			let c = _c();
+			v
+				.entry(self.jit.offset().0)
+				.and_modify(|s| {
+					*s += ", ";
+					*s += c.as_ref();
+				})
+				.or_insert_with(|| c.into());
+			self.comments.set(v);
+		}
 	}
 
 	fn symbol(&mut self, symbol: impl Into<String>) {

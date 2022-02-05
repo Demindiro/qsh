@@ -17,16 +17,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let f = token::TokenParser::new(f)
 		.map(Result::unwrap)
 		.collect::<Vec<_>>();
-	dbg!(&f);
+	//dbg!(&f);
 	let f = op::OpTree::new(f.into_iter()).unwrap();
-	dbg!(&f);
+	//dbg!(&f);
 	let f = jit::compile(f, |f| match f {
 		"print" => Some(runtime::ffi_print),
 		"exec" => Some(runtime::ffi_exec),
 		"split" => Some(runtime::ffi_split),
 		_ => None,
 	});
-	dbg!(&f);
+	//dbg!(&f);
 	f.call(&[]);
 	Ok(())
 }

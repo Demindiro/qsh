@@ -3,6 +3,7 @@
 #![feature(core_intrinsics)]
 #![feature(if_let_guard)]
 #![feature(iter_intersperse)]
+#![feature(map_try_insert)]
 #![feature(trusted_len)]
 
 mod jit;

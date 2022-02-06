@@ -1,6 +1,7 @@
 use crate::token::Token;
 use bitflags::bitflags;
 use core::iter::Peekable;
+use std::collections::BTreeMap;
 
 #[derive(Debug, PartialEq)]
 pub enum Op<'a> {
@@ -43,6 +44,19 @@ pub enum ForRange {
 	Variable(RegisterIndex),
 }
 
+/// A `qsh` function defined with `fn`.
+#[derive(Debug, PartialEq)]
+pub struct Function<'a> {
+	pub arguments: Box<[&'a str]>,
+	pub ops: Box<[Op<'a>]>,
+	/// A list of registers to their corresponding variables.
+	///
+	/// The first few correspond with the arguments.
+	///
+	/// There may be multiple registers per variable.
+	pub registers: Box<[Register<'a>]>,
+}
+
 /// An AST.
 #[derive(Debug)]
 pub struct OpTree<'a> {
@@ -52,6 +66,8 @@ pub struct OpTree<'a> {
 	///
 	/// There may be multiple registers per variable.
 	pub registers: Vec<Register<'a>>,
+	/// All functions found in the script.
+	pub functions: BTreeMap<&'a str, Function<'a>>,
 	/// How many layers of loops we are in.
 	loop_depth: usize,
 }
@@ -62,6 +78,7 @@ impl<'a> OpTree<'a> {
 		let mut s = Self {
 			ops: Default::default(),
 			registers: Default::default(),
+			functions: Default::default(),
 			loop_depth: 0,
 		};
 		s.ops = s
@@ -281,6 +298,46 @@ impl<'a> OpTree<'a> {
 					// TODO add warning for redundant integer
 				}
 				Token::Separator => {}
+				Token::Function => {
+					if let Some(Token::Word(name)) = tokens.next() {
+						// Collect arguments
+						let mut args = Vec::new();
+						let mut registers = Vec::new();
+						while let tk = tokens.next() {
+							match tk {
+								Some(Token::Word(arg)) => {
+									args.push(arg);
+									registers.push(Register {
+										variable: arg,
+										constant: false,
+										types: Types::ALL,
+									});
+								}
+								Some(Token::Separator) => break,
+								_ => todo!(),
+							}
+						}
+						// Create new tree for function (with separate variables etc).
+						let mut func = OpTree {
+							ops: Default::default(),
+							registers,
+							functions: Default::default(),
+							loop_depth: 0,
+						};
+						// Parse function body
+						match func.parse_expr(tokens)? {
+							Expression::Statement(ops) => func.ops = ops,
+							Expression::Integer(_) | Expression::String(_) | Expression::Variable(_) => (),
+						}
+						self.functions.try_insert(name, Function {
+							arguments: args.into(),
+							ops: func.ops,
+							registers: func.registers.into(),
+						}).expect("todo");
+					} else {
+						todo!();
+					}
+				}
 				t => todo!("parse {:?}", t),
 			}
 		}
@@ -597,6 +654,53 @@ mod test {
 					pipe_out: [].into(),
 				},
 			]
+		);
+	}
+
+	#[test]
+	fn function() {
+		let t = parse("fn foo; bar");
+		assert_eq!(
+			t.functions["foo"],
+			Function {
+				arguments: [].into(),
+				ops: [Op::Call {
+					function: "bar",
+					arguments: [].into(),
+					pipe_in: [].into(),
+					pipe_out: [].into(),
+				}].into(),
+				registers: [].into(),
+			}
+		);
+	}
+
+	#[test]
+	fn function_args() {
+		let t = parse("fn foo x y; bar");
+		assert_eq!(
+			t.functions["foo"],
+			Function {
+				arguments: ["x", "y"].into(),
+				ops: [Op::Call {
+					function: "bar",
+					arguments: [].into(),
+					pipe_in: [].into(),
+					pipe_out: [].into(),
+				}].into(),
+				registers: [
+					Register {
+						variable: "x",
+						constant: false,
+						types: Types::ALL,
+					},
+					Register {
+						variable: "y",
+						constant: false,
+						types: Types::ALL,
+					},
+				].into(),
+			}
 		);
 	}
 }

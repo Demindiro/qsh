@@ -1,6 +1,6 @@
 use crate::op::{self, Expression, ForRange, Op, OpTree, RegisterIndex};
-use core::cell::Cell;
 use crate::runtime::*;
+use core::cell::Cell;
 use core::fmt;
 use core::mem;
 #[cfg(target_arch = "x86_64")]
@@ -120,8 +120,17 @@ fn compile_x64<F>(ops: OpTree<'_>, resolve_fn: F) -> Function
 where
 	F: Fn(&str) -> Option<QFunction>,
 {
-	let mut jit = X64Compiler::new(resolve_fn, ops.registers.into());
+	let mut jit = X64Compiler::new(resolve_fn, ops.registers.into(), ops.functions);
+
+	// main function
+	jit.insert_prologue();
 	jit.compile(ops.ops);
+	jit.insert_epilogue();
+
+	// user defined functions
+	jit.compile_functions();
+
+	// small routines + data
 	jit.finish()
 }
 
@@ -141,6 +150,7 @@ where
 	comments: Cell<BTreeMap<usize, String>>,
 	stack_offset: i32,
 	registers: Box<[op::Register<'a>]>,
+	functions: BTreeMap<&'a str, (op::Function<'a>, dynasmrt::DynamicLabel)>,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -148,9 +158,9 @@ impl<'a, F> X64Compiler<'a, F>
 where
 	F: Fn(&str) -> Option<QFunction>,
 {
-	fn new(resolve_fn: F, registers: Box<[op::Register<'a>]>) -> Self {
+	fn new(resolve_fn: F, registers: Box<[op::Register<'a>]>, functions: BTreeMap<&'a str, op::Function<'a>>) -> Self {
+		let mut jit = dynasmrt::x64::Assembler::new().unwrap();
 		let mut s = Self {
-			jit: dynasmrt::x64::Assembler::new().unwrap(),
 			data: Default::default(),
 			resolve_fn,
 			strings: Default::default(),
@@ -161,26 +171,44 @@ where
 			comments: Default::default(),
 			stack_offset: 0,
 			registers,
+			functions: functions.into_iter().map(|(k, v)| (k, (v, jit.new_dynamic_label()))).collect(),
+			jit,
 		};
-		let l = (s.registers.len() * 16).try_into().unwrap();
-		dynasm!(s.jit
+		s
+	}
+
+	/// Insert the common function prologue.
+	fn insert_prologue(&mut self) {
+		let l = (self.registers.len() * 16).try_into().unwrap();
+		dynasm!(self.jit
 			; mov ecx, l
 			; xor eax, eax
 			; sub rsp, rcx
 			; mov rdi, rsp
 			; rep stosb
 		);
-		s
 	}
 
-	fn finish(mut self) -> Function {
+	/// Insert the common function epilogue.
+	fn insert_epilogue(&mut self) {
 		assert_eq!(self.stack_offset, 0, "stack is not properly restored");
 		dynasm!(self.jit
 			;; self.comment(|| "return")
+			// stack OOB check was already done in insert_prologue, so just cast
 			; add rsp, (self.registers.len() * 16) as i32
 			; ret
+			;; self.symbol("bad_argument_count")
+			; bad_argument_count:
+			// Ditto
+			; add rsp, (self.registers.len() * 16) as i32
+			// Shortest sequence to move -2 to rax
+			; push BYTE -2
+			; pop rax
+			; ret
 		);
+	}
 
+	fn finish(mut self) -> Function {
 		// Add data
 		let data_offset = self.jit.offset();
 		dynasm!(self.jit
@@ -221,6 +249,31 @@ where
 		}
 	}
 
+	/// Compile all functions.
+	fn compile_functions(&mut self) {
+		for (name, (f, lbl)) in mem::take(&mut self.functions).into_iter() {
+			assert_eq!(self.stack_offset, 0, "stack is not properly restored");
+			self.symbol(name);
+			// Arguments to this function are not checked during compile time, so check
+			// during runtime.
+			// arg registers in order: rdi, rsi, rdx, rcx, r8, r9
+			// arguments: argc, argv, outc, outb, inc, inv
+			dynasm!(self.jit
+				; =>lbl
+				; cmp rdi, f.arguments.len().try_into().unwrap()
+				; jne >bad_argument_count
+				; test rdx, rdx // outc == 0 always for now.
+				; jne >bad_argument_count
+				; test r8, r8 // inc == 0 always for now.
+				; jne >bad_argument_count
+			);
+			self.registers = f.registers;
+			self.insert_prologue();
+			self.compile(f.ops);
+			self.insert_epilogue();
+		}
+	}
+
 	fn compile(&mut self, ops: Box<[Op<'a>]>) {
 		for op in ops.into_vec() {
 			match op {
@@ -231,10 +284,18 @@ where
 					pipe_in,
 				} => {
 					self.comment(|| format!("call '{}'", &function));
-					// Resolve function or default to 'exec'
-					let (f, push_fn_name) = (self.resolve_fn)(&*function)
-						.map(|f| (f, false))
-						.or_else(|| (self.resolve_fn)("exec").map(|f| (f, true)))
+
+					enum Fn {
+						BuiltIn(QFunction),
+						User(dynasmrt::DynamicLabel),
+						Exec(QFunction),
+					}
+
+					// Resolve built-in function, user defined function or default to 'exec'
+					let f = (self.resolve_fn)(&*function)
+						.map(Fn::BuiltIn)
+						.or_else(|| self.functions.get(&function).map(|l| Fn::User(l.1)))
+						.or_else(|| (self.resolve_fn)("exec").map(Fn::Exec))
 						.expect("'exec' not defined");
 
 					// TODO should we clear pipe_out values before a call?
@@ -294,7 +355,7 @@ where
 					// Note start of data if all arguments are static. Also push program name
 					// if using 'exec'
 					let i = self.data.len();
-					let fn_str_val = if push_fn_name {
+					let fn_str_val = if let Fn::Exec(_) = f {
 						let f = Value::String((&*function).into());
 						let fp = unsafe { core::mem::transmute_copy::<_, [i64; 2]>(&f) };
 						self.data.push(f);
@@ -303,17 +364,24 @@ where
 						None
 					};
 					#[cfg(feature = "iced")]
-					self.symbols
-						.entry(f as usize)
-						.or_default()
-						.push(push_fn_name.then(|| "exec").unwrap_or(function).into());
+					match f {
+						Fn::User(_) => (),
+						Fn::BuiltIn(f) => self.symbols
+							.entry(f as usize)
+							.or_default()
+							.push(function.into()),
+						Fn::Exec(f) => self.symbols
+							.entry(f as usize)
+							.or_default()
+							.push("exec".into()),
+					}
 
 					// Figure out whether we need to use the stack.
 					let use_stack = arguments.iter().any(|a| match a {
 						Expression::Variable(_) => true,
 						_ => false,
 					});
-					let len = arguments.len() + push_fn_name.then(|| 1).unwrap_or(0);
+					let len = arguments.len() + fn_str_val.is_some().then(|| 1).unwrap_or(0);
 
 					// Create argument list
 					if use_stack {
@@ -382,10 +450,16 @@ where
 						dynasm!(self.jit ; push rbx);
 						self.stack_offset += 8;
 					}
-					dynasm!(self.jit
-						; mov rax, QWORD f as _
-						; call rax
-					);
+
+					match f {
+						Fn::User(f) => dynasm!(self.jit ; call => f),
+						Fn::BuiltIn(f) | Fn::Exec(f) => {
+							dynasm!(self.jit
+								; mov rax, QWORD f as _
+								; call rax
+							);
+						}
+					}
 
 					// Restore stack
 					let offset = self.stack_offset - original_stack_offset;
@@ -719,15 +793,14 @@ where
 	// Non-mutable to avoid borrow errors in trivial cases.
 	fn comment<R>(&self, comment: impl FnOnce() -> R)
 	where
-		R: AsRef<str> + Into<String>
+		R: AsRef<str> + Into<String>,
 	{
 		let _c = comment;
 		#[cfg(feature = "iced")]
 		{
 			let mut v = self.comments.take();
 			let c = _c();
-			v
-				.entry(self.jit.offset().0)
+			v.entry(self.jit.offset().0)
 				.and_modify(|s| {
 					*s += ", ";
 					*s += c.as_ref();
@@ -754,7 +827,7 @@ where
 
 #[cfg(test)]
 mod test {
-	use super::*;
+	use super::{*, Function};
 	use crate::op::*;
 	use crate::token::*;
 	use crate::wrap_ffi;
@@ -981,5 +1054,11 @@ mod test {
 	fn block() {
 		run("@y = kek; if true; (print x; print @y; false); if @?; print z");
 		OUT.with(|out| assert_eq!("x\nkek\n", &*out.borrow()));
+	}
+
+	#[test]
+	fn function() {
+		run("fn foo; print yay; foo");
+		OUT.with(|out| assert_eq!("yay\n", &*out.borrow()));
 	}
 }

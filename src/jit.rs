@@ -123,7 +123,7 @@ where
 	let mut jit = X64Compiler::new(resolve_fn, ops.registers.into(), ops.functions);
 
 	// main function
-	jit.insert_prologue();
+	jit.insert_prologue(0);
 	jit.compile(ops.ops);
 	jit.insert_epilogue();
 
@@ -158,7 +158,11 @@ impl<'a, F> X64Compiler<'a, F>
 where
 	F: Fn(&str) -> Option<QFunction>,
 {
-	fn new(resolve_fn: F, registers: Box<[op::Register<'a>]>, functions: BTreeMap<&'a str, op::Function<'a>>) -> Self {
+	fn new(
+		resolve_fn: F,
+		registers: Box<[op::Register<'a>]>,
+		functions: BTreeMap<&'a str, op::Function<'a>>,
+	) -> Self {
 		let mut jit = dynasmrt::x64::Assembler::new().unwrap();
 		let mut s = Self {
 			data: Default::default(),
@@ -171,16 +175,22 @@ where
 			comments: Default::default(),
 			stack_offset: 0,
 			registers,
-			functions: functions.into_iter().map(|(k, v)| (k, (v, jit.new_dynamic_label()))).collect(),
+			functions: functions
+				.into_iter()
+				.map(|(k, v)| (k, (v, jit.new_dynamic_label())))
+				.collect(),
 			jit,
 		};
 		s
 	}
 
 	/// Insert the common function prologue.
-	fn insert_prologue(&mut self) {
-		let l = (self.registers.len() * 16).try_into().unwrap();
+	fn insert_prologue(&mut self, argument_count: usize) {
+		let l = ((self.registers.len() - argument_count) * 16)
+			.try_into()
+			.unwrap();
 		dynasm!(self.jit
+			;; self.comment(|| "set non-arg registers to nil")
 			; mov ecx, l
 			; xor eax, eax
 			; sub rsp, rcx
@@ -260,15 +270,27 @@ where
 			// arguments: argc, argv, outc, outb, inc, inv
 			dynasm!(self.jit
 				; =>lbl
+				;; self.comment(|| "check argument count")
 				; cmp rdi, f.arguments.len().try_into().unwrap()
 				; jne >bad_argument_count
 				; test rdx, rdx // outc == 0 always for now.
 				; jne >bad_argument_count
 				; test r8, r8 // inc == 0 always for now.
 				; jne >bad_argument_count
+				;; self.comment(|| "preserve arg count")
+				; mov r11, rdi
+				;; self.comment(|| "adjust arg count ahead of time (avoid stall)")
+				; shl r11, 4
 			);
 			self.registers = f.registers;
-			self.insert_prologue();
+			self.insert_prologue(f.arguments.len());
+			dynasm!(self.jit
+				;; self.comment(|| "copy arguments to virtual registers")
+				; sub rsp, r11
+				; mov rcx, r11
+				; mov rdi, rsp
+				; rep movsb
+			);
 			self.compile(f.ops);
 			self.insert_epilogue();
 		}
@@ -366,11 +388,13 @@ where
 					#[cfg(feature = "iced")]
 					match f {
 						Fn::User(_) => (),
-						Fn::BuiltIn(f) => self.symbols
+						Fn::BuiltIn(f) => self
+							.symbols
 							.entry(f as usize)
 							.or_default()
 							.push(function.into()),
-						Fn::Exec(f) => self.symbols
+						Fn::Exec(f) => self
+							.symbols
 							.entry(f as usize)
 							.or_default()
 							.push("exec".into()),
@@ -827,7 +851,7 @@ where
 
 #[cfg(test)]
 mod test {
-	use super::{*, Function};
+	use super::{Function, *};
 	use crate::op::*;
 	use crate::token::*;
 	use crate::wrap_ffi;
@@ -1060,5 +1084,17 @@ mod test {
 	fn function() {
 		run("fn foo; print yay; foo");
 		OUT.with(|out| assert_eq!("yay\n", &*out.borrow()));
+	}
+
+	#[test]
+	fn function_arg() {
+		run("fn foo a; print @a; foo abracadabra");
+		OUT.with(|out| assert_eq!("abracadabra\n", &*out.borrow()));
+	}
+
+	#[test]
+	fn function_wrong_arg() {
+		run("fn foo a; print @; foo abracadabra");
+		OUT.with(|out| assert_eq!("(nil)\n", &*out.borrow()));
 	}
 }

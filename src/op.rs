@@ -327,13 +327,20 @@ impl<'a> OpTree<'a> {
 						// Parse function body
 						match func.parse_expr(tokens)? {
 							Expression::Statement(ops) => func.ops = ops,
-							Expression::Integer(_) | Expression::String(_) | Expression::Variable(_) => (),
+							Expression::Integer(_)
+							| Expression::String(_)
+							| Expression::Variable(_) => (),
 						}
-						self.functions.try_insert(name, Function {
-							arguments: args.into(),
-							ops: func.ops,
-							registers: func.registers.into(),
-						}).expect("todo");
+						self.functions
+							.try_insert(
+								name,
+								Function {
+									arguments: args.into(),
+									ops: func.ops,
+									registers: func.registers.into(),
+								},
+							)
+							.expect("todo");
 					} else {
 						todo!();
 					}
@@ -669,7 +676,8 @@ mod test {
 					arguments: [].into(),
 					pipe_in: [].into(),
 					pipe_out: [].into(),
-				}].into(),
+				}]
+				.into(),
 				registers: [].into(),
 			}
 		);
@@ -687,7 +695,8 @@ mod test {
 					arguments: [].into(),
 					pipe_in: [].into(),
 					pipe_out: [].into(),
-				}].into(),
+				}]
+				.into(),
 				registers: [
 					Register {
 						variable: "x",
@@ -699,7 +708,39 @@ mod test {
 						constant: false,
 						types: Types::ALL,
 					},
-				].into(),
+				]
+				.into(),
+			}
+		);
+	}
+
+	#[test]
+	fn function_wrong_arg() {
+		let t = parse("fn foo x; bar @y");
+		assert_eq!(
+			t.functions["foo"],
+			Function {
+				arguments: ["x"].into(),
+				ops: [Op::Call {
+					function: "bar",
+					arguments: [Expression::Variable(RegisterIndex(1)),].into(),
+					pipe_in: [].into(),
+					pipe_out: [].into(),
+				}]
+				.into(),
+				registers: [
+					Register {
+						variable: "x",
+						constant: false,
+						types: Types::ALL,
+					},
+					Register {
+						variable: "y",
+						constant: false,
+						types: Types::ALL,
+					},
+				]
+				.into(),
 			}
 		);
 	}

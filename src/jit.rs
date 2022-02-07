@@ -207,18 +207,21 @@ where
 			// stack OOB check was already done in insert_prologue, so just cast
 			; add rsp, (self.registers.len() * 16) as i32
 			; ret
+		);
+	}
+
+	fn finish(mut self) -> Function {
+		// Add common routines
+		dynasm!(self.jit
 			;; self.symbol("bad_argument_count")
 			; bad_argument_count:
-			// Ditto
-			; add rsp, (self.registers.len() * 16) as i32
+			// Checks are done before allocating on the stack, so no adjustment are needed.
 			// Shortest sequence to move -2 to rax
 			; push BYTE -2
 			; pop rax
 			; ret
 		);
-	}
 
-	fn finish(mut self) -> Function {
 		// Add data
 		let data_offset = self.jit.offset();
 		dynasm!(self.jit
@@ -282,6 +285,7 @@ where
 				;; self.comment(|| "adjust arg count ahead of time (avoid stall)")
 				; shl r11, 4
 			);
+			// Initialize virtual registers
 			self.registers = f.registers;
 			self.insert_prologue(f.arguments.len());
 			dynasm!(self.jit
@@ -290,8 +294,22 @@ where
 				; mov rcx, r11
 				; mov rdi, rsp
 				; rep movsb
+				;; self.comment(|| "preserve ")
 			);
+			// Compile function itself
 			self.compile(f.ops);
+			// Copy virtual registers to out pipes and return
+			self.comment(|| "copy to out pipes");
+			for &out in f.pipe_out.iter() {
+				// Find the last used register that corresponds to the out variable.
+				// If not found, just ignore it. The caller should have set it to nil anyways.
+				if let Some(r) = self.registers.iter().rev().find(|r| r.variable == out) {
+					self.comment(|| "copy ".to_string() + out);
+					todo!("different function signature needed");
+				} else {
+					self.comment(|| "ignore ".to_string() + out);
+				}
+			}
 			self.insert_epilogue();
 		}
 	}
@@ -1096,5 +1114,11 @@ mod test {
 	fn function_wrong_arg() {
 		run("fn foo a; print @; foo abracadabra");
 		OUT.with(|out| assert_eq!("(nil)\n", &*out.borrow()));
+	}
+
+	#[test]
+	fn function_pipe_out() {
+		run("fn foo a >x; print @a >x; foo abracadabra >; print its @?");
+		OUT.with(|out| assert_eq!("its abracadabra\n", &*out.borrow()));
 	}
 }

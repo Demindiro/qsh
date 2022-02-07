@@ -48,6 +48,8 @@ pub enum ForRange {
 #[derive(Debug, PartialEq)]
 pub struct Function<'a> {
 	pub arguments: Box<[&'a str]>,
+	pub pipe_in: Box<[&'a str]>,
+	pub pipe_out: Box<[&'a str]>,
 	pub ops: Box<[Op<'a>]>,
 	/// A list of registers to their corresponding variables.
 	///
@@ -190,6 +192,46 @@ impl<'a> OpTree<'a> {
 		Ok(op)
 	}
 
+	/// Parse a call, e.g. `echo @x >y`
+	fn parse_call<I>(
+		&mut self,
+		function: &'a str,
+		tokens: &mut I,
+	) -> Result<Op<'a>, ParseError>
+	where
+		I: Iterator<Item = Token<'a>>,
+	{
+		let mut args = Vec::new();
+		let mut pipe_out = Vec::new();
+		let mut pipe_in = Vec::new();
+		while let Some(tk) = tokens.next() {
+			match tk {
+				Token::BlockOpen => todo!("scope open"),
+				Token::BlockClose => todo!("scope close"),
+				Token::Word(s) => args.push(Expression::String(s.into())),
+				Token::String(s) => {
+					// TODO unescape
+					args.push(Expression::String(s.into()))
+				}
+				Token::Variable(v) => {
+					let v = self.alloc_register(v, false);
+					args.push(Expression::Variable(v))
+				}
+				Token::Integer(i) => args.push(Expression::Integer(i)),
+				Token::PipeOut { from, to } => pipe_out.push((from, self.alloc_register(to, true))),
+				Token::PipeIn { from, to } => pipe_in.push((self.alloc_register(from, false), to)),
+				Token::Separator => break,
+				Token::Function => todo!("convert 'fn' to string arg"),
+			}
+		}
+		Ok(Op::Call {
+			function,
+			arguments: args.into(),
+			pipe_out: pipe_out.into(),
+			pipe_in: pipe_in.into(),
+		})
+	}
+
 	/// Parse an "expression", i.e. `if <expr>`, `for v in <expr>`, ..
 	fn parse_expr<I>(&mut self, tokens: &mut Peekable<I>) -> Result<Expression<'a>, ParseError>
 	where
@@ -203,25 +245,7 @@ impl<'a> OpTree<'a> {
 			Token::Word("if") => Ok(Expression::Statement([self.parse_if(tokens)?].into())),
 			Token::Word("for") => Ok(Expression::Statement([self.parse_for(tokens)?].into())),
 			Token::Word("while") => Ok(Expression::Statement([self.parse_while(tokens)?].into())),
-			Token::Word(f) => {
-				let mut args = Vec::new();
-				while let Some(tk) = tokens.peek() {
-					if tk == &Token::Separator {
-						tokens.next().unwrap();
-						break;
-					}
-					args.push(self.parse_arg(tokens)?);
-				}
-				Ok(Expression::Statement(
-					[Op::Call {
-						function: f,
-						arguments: args.into(),
-						pipe_out: [].into(),
-						pipe_in: [].into(),
-					}]
-					.into(),
-				))
-			}
+			Token::Word(f) => Ok(Expression::Statement([self.parse_call(f, tokens)?].into())),
 			Token::String(s) => Ok(Expression::String(s.into())),
 			Token::Variable(s) => {
 				assert_eq!(tokens.next(), Some(Token::Separator));
@@ -252,40 +276,7 @@ impl<'a> OpTree<'a> {
 				Token::Word("if") => ops.push(self.parse_if(tokens)?),
 				Token::Word("for") => ops.push(self.parse_for(tokens)?),
 				Token::Word("while") => ops.push(self.parse_while(tokens)?),
-				Token::Word(f) => {
-					let mut args = Vec::new();
-					let mut pipe_out = Vec::new();
-					let mut pipe_in = Vec::new();
-					while tokens.peek().map_or(false, |t| t != &Token::Separator) {
-						match tokens.next().unwrap() {
-							Token::BlockOpen => todo!("scope open"),
-							Token::BlockClose => todo!("scope close"),
-							Token::Word(s) => args.push(Expression::String(s.into())),
-							Token::String(s) => {
-								// TODO unescape
-								args.push(Expression::String(s.into()))
-							}
-							Token::Variable(v) => {
-								let v = self.alloc_register(v, false);
-								args.push(Expression::Variable(v))
-							}
-							Token::Integer(i) => args.push(Expression::Integer(i)),
-							Token::PipeOut { from, to } => {
-								pipe_out.push((from, self.alloc_register(to, true)))
-							}
-							Token::PipeIn { from, to } => {
-								pipe_in.push((self.alloc_register(from, false), to))
-							}
-							t => todo!("parse {:?}", t),
-						}
-					}
-					ops.push(Op::Call {
-						function: f,
-						arguments: args.into(),
-						pipe_out: pipe_out.into(),
-						pipe_in: pipe_in.into(),
-					});
-				}
+				Token::Word(f) => ops.push(self.parse_call(f, tokens)?),
 				Token::Variable(s) if tokens.peek() == Some(&Token::Word("=")) => {
 					tokens.next().unwrap();
 					ops.push(Op::Assign {
@@ -302,21 +293,27 @@ impl<'a> OpTree<'a> {
 					if let Some(Token::Word(name)) = tokens.next() {
 						// Collect arguments
 						let mut args = Vec::new();
-						let mut registers = Vec::new();
+						let mut pipe_in = Vec::new();
+						let mut pipe_out = Vec::new();
 						while let tk = tokens.next() {
 							match tk {
-								Some(Token::Word(arg)) => {
-									args.push(arg);
-									registers.push(Register {
-										variable: arg,
-										constant: false,
-										types: Types::ALL,
-									});
-								}
+								Some(Token::Word(arg)) => args.push(arg),
+								Some(Token::PipeIn { from, to: "" }) => pipe_in.push(from),
+								Some(Token::PipeOut { from: "", to }) => pipe_out.push(to),
 								Some(Token::Separator) => break,
 								_ => todo!(),
 							}
 						}
+						// Don't allocate for pipe_out as those default to nil in all cases.
+						let registers = args
+							.iter()
+							.chain(&*pipe_in)
+							.map(|&variable| Register {
+								variable,
+								constant: false,
+								types: Types::ALL,
+							})
+							.collect();
 						// Create new tree for function (with separate variables etc).
 						let mut func = OpTree {
 							ops: Default::default(),
@@ -336,6 +333,8 @@ impl<'a> OpTree<'a> {
 								name,
 								Function {
 									arguments: args.into(),
+									pipe_in: pipe_in.into(),
+									pipe_out: pipe_out.into(),
 									ops: func.ops,
 									registers: func.registers.into(),
 								},
@@ -671,6 +670,8 @@ mod test {
 			t.functions["foo"],
 			Function {
 				arguments: [].into(),
+				pipe_in: [].into(),
+				pipe_out: [].into(),
 				ops: [Op::Call {
 					function: "bar",
 					arguments: [].into(),
@@ -690,6 +691,8 @@ mod test {
 			t.functions["foo"],
 			Function {
 				arguments: ["x", "y"].into(),
+				pipe_in: [].into(),
+				pipe_out: [].into(),
 				ops: [Op::Call {
 					function: "bar",
 					arguments: [].into(),
@@ -721,6 +724,8 @@ mod test {
 			t.functions["foo"],
 			Function {
 				arguments: ["x"].into(),
+				pipe_in: [].into(),
+				pipe_out: [].into(),
 				ops: [Op::Call {
 					function: "bar",
 					arguments: [Expression::Variable(RegisterIndex(1)),].into(),
@@ -742,6 +747,153 @@ mod test {
 				]
 				.into(),
 			}
+		);
+	}
+
+	#[test]
+	fn function_pipe_out() {
+		let t = parse("fn foo x >y; bar @x >y");
+		assert_eq!(
+			t.functions["foo"],
+			Function {
+				arguments: ["x"].into(),
+				pipe_in: [].into(),
+				pipe_out: ["y"].into(),
+				ops: [Op::Call {
+					function: "bar",
+					arguments: [Expression::Variable(RegisterIndex(0)),].into(),
+					pipe_in: [].into(),
+					pipe_out: [("", RegisterIndex(1))].into(),
+				}]
+				.into(),
+				registers: [
+					Register {
+						variable: "x",
+						constant: false,
+						types: Types::ALL,
+					},
+					Register {
+						variable: "y",
+						constant: false,
+						types: Types::ALL,
+					},
+				]
+				.into(),
+			}
+		);
+		// arguments > pipe out > pipe in, hence these should be equivalent
+		assert_eq!(
+			t.functions["foo"],
+			parse("fn foo >y x; bar @x >y").functions["foo"]
+		);
+	}
+
+	#[test]
+	fn function_pipe_out_unused() {
+		let t = parse("fn foo x >y; bar @x");
+		assert_eq!(
+			t.functions["foo"],
+			Function {
+				arguments: ["x"].into(),
+				pipe_in: [].into(),
+				pipe_out: ["y"].into(),
+				ops: [Op::Call {
+					function: "bar",
+					arguments: [Expression::Variable(RegisterIndex(0)),].into(),
+					pipe_in: [].into(),
+					pipe_out: [].into(),
+				}]
+				.into(),
+				registers: [
+					Register {
+						variable: "x",
+						constant: false,
+						types: Types::ALL,
+					},
+				]
+				.into(),
+			}
+		);
+	}
+
+	#[test]
+	fn function_pipe_in() {
+		let t = parse("fn foo x <y; bar @x <y");
+		assert_eq!(
+			t.functions["foo"],
+			Function {
+				arguments: ["x"].into(),
+				pipe_in: ["y"].into(),
+				pipe_out: [].into(),
+				ops: [Op::Call {
+					function: "bar",
+					arguments: [Expression::Variable(RegisterIndex(0)),].into(),
+					pipe_in: [(RegisterIndex(1), "")].into(),
+					pipe_out: [].into(),
+				}]
+				.into(),
+				registers: [
+					Register {
+						variable: "x",
+						constant: false,
+						types: Types::ALL,
+					},
+					Register {
+						variable: "y",
+						constant: false,
+						types: Types::ALL,
+					},
+				]
+				.into(),
+			}
+		);
+		// arguments > pipe out > pipe in, hence these should be equivalent
+		assert_eq!(
+			t.functions["foo"],
+			parse("fn foo <y x; bar @x <y").functions["foo"]
+		);
+	}
+
+	#[test]
+	fn function_pipe_in_out() {
+		let t = parse("fn foo x <y >z; bar @x <y >z");
+		assert_eq!(
+			t.functions["foo"],
+			Function {
+				arguments: ["x"].into(),
+				pipe_in: ["y"].into(),
+				pipe_out: ["z"].into(),
+				ops: [Op::Call {
+					function: "bar",
+					arguments: [Expression::Variable(RegisterIndex(0)),].into(),
+					pipe_in: [(RegisterIndex(1), "")].into(),
+					pipe_out: [("", RegisterIndex(2))].into(),
+				}]
+				.into(),
+				registers: [
+					Register {
+						variable: "x",
+						constant: false,
+						types: Types::ALL,
+					},
+					Register {
+						variable: "y",
+						constant: false,
+						types: Types::ALL,
+					},
+					Register {
+						variable: "z",
+						constant: false,
+						types: Types::ALL,
+					},
+				]
+				.into(),
+			}
+		);
+		// arguments > pipe out > pipe in, hence these should be equivalent
+		assert_eq!(
+			t.functions["foo"],
+			parse("fn foo >z <y x; bar @x <y >z").functions["foo"]
 		);
 	}
 }

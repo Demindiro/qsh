@@ -223,34 +223,23 @@ where
 			self.symbol(name);
 			// Arguments to this function are not checked during compile time, so check
 			// during runtime.
-			// arguments: argv + inv (rsi), outv (r8)
+			// arguments: argv + inv + other virt regs + outv (rsp + 8)
 			// Note that argv, outv and inv have a fixed size.
+			// Registers space is allocated by the caller.
 			dynasm!(self.jit
 				; =>lbl
-			);
-			// Initialize virtual registers (TODO in pipes)
-			self.registers = f.registers;
-			let len = f.arguments.len() + f.pipe_in.len();
-			self.insert_prologue(len);
-			dynasm!(self.jit
-				;; self.comment(|| "copy arguments & in pipes to virtual registers")
-				; mov ecx, (len * 16).try_into().unwrap()
-				; sub rsp, rcx
-				; mov rdi, rsp
-				; rep movsb
-			);
-			dynasm!(self.jit
-				;; self.comment(|| "save out pipes pointer")
-				; push r8
+				// Registers are already initialized by the caller, so don't use standard prologue
+				// Account for return address
 				;; self.stack_offset += 8
 			);
-			// Compile function itself
+
+			self.registers = f.registers;
 			self.compile(f.ops);
+
 			// Copy virtual registers to out pipes and return
 			dynasm!(self.jit
 				;; self.comment(|| "copy to out pipes")
-				; pop rsi
-				;; self.stack_offset -= 8
+				; lea rsi, [rsp + i32::try_from(self.registers.len() * 16).unwrap() + self.stack_offset]
 			);
 			for &out in f.pipe_out.iter() {
 				// Find the last used register that corresponds to the out variable.
@@ -283,7 +272,11 @@ where
 					; add rsi, 8
 				);
 			}
-			self.insert_epilogue();
+			// Registers are already initialized by the caller, so don't use standard epilogue
+			dynasm!(self.jit
+				; ret
+				;; self.stack_offset -= 8
+			);
 		}
 	}
 
@@ -596,10 +589,58 @@ where
 			pipe_out.len(),
 			"pipe_out mismatch (bug in op parser)"
 		);
+		let registers_len = func.registers.len();
 
-		// Calling convention: argv + inv (rsi), outv (r8)
+		// Calling convention: argv + inv + other virt regs + outv (rsp + 8)
 
 		let original_stack_offset = self.stack_offset;
+
+		// Align stack beforehand
+		// Note that we want to align on a mod 16 + 8 boundary so that the callee
+		// compensates properly.
+		let offt = (pipe_out.len() + pipe_in.len() * 2 + arguments.len() * 2) * 8;
+		let offt = if (i32::try_from(offt).unwrap() + self.stack_offset) % 16 == 8 {
+			dynasm!(self.jit
+				; push rbx
+			);
+			self.stack_offset += 8;
+		};
+
+		// Push pipe out
+		self.comment(|| "pipe out");
+		let (func, lbl) = &self.functions[function];
+		let lbl = *lbl;
+		'out: for (from, to) in pipe_out.into_vec().into_iter().rev() {
+			for &out in func.pipe_out.iter() {
+				if from == out {
+					let offt = self.variable_offset(to);
+					dynasm!(self.jit
+						; lea rax, [rsp + offt]
+						; push rax
+						;; self.stack_offset += 8
+					);
+					continue 'out;
+				}
+			}
+			dynasm!(self.jit
+				; push 0
+				;; self.stack_offset += 8
+			);
+		}
+
+		// Allocate other virtual registers
+		let l = ((registers_len - arguments.len() - pipe_in.len()) * 16)
+			.try_into()
+			.unwrap();
+		dynasm!(self.jit
+			;; self.comment(|| "set non-arg registers to nil")
+			; mov ecx, l
+			; xor eax, eax
+			; sub rsp, rcx
+			;; self.stack_offset += l
+			; mov rdi, rsp
+			; rep stosb
+		);
 
 		// Push pipe in
 		self.comment(|| "pipe in");
@@ -645,46 +686,11 @@ where
 			self.stack_offset += self.push_stack_value((&v).into());
 			self.data.push(v);
 		}
-		dynasm!(self.jit
-			; mov rsi, rsp
-		);
-
-		// Push pipe out
-		self.comment(|| "pipe out");
-		let (func, lbl) = &self.functions[function];
-		'out: for (from, to) in pipe_out.into_vec().into_iter().rev() {
-			for &out in func.pipe_out.iter() {
-				if from == out {
-					let offt = self.variable_offset(to);
-					dynasm!(self.jit
-						; lea rax, [rsp + offt]
-						; push rax
-						;; self.stack_offset += 8
-					);
-					continue 'out;
-				}
-			}
-			dynasm!(self.jit
-				; push 0
-				;; self.stack_offset += 8
-			);
-		}
-		dynasm!(self.jit
-			; mov r8, rsp
-		);
-
-		// Align stack
-		if self.stack_offset % 16 != 8 {
-			dynasm!(self.jit
-				; push rbx
-			);
-			self.stack_offset += 8;
-		}
 
 		// Call
 		dynasm!(self.jit
 			;; self.comment(|| "call")
-			; call =>*lbl
+			; call =>lbl
 		);
 
 		// Restore stack

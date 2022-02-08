@@ -111,7 +111,7 @@ where
 		// Note that we want to align on a mod 16 + 8 boundary so that the callee
 		// compensates properly.
 		let offt = (pipe_out.len() + pipe_in.len() * 2 + arguments.len() * 2) * 8;
-		let offt = if (i32::try_from(offt).unwrap() + self.stack_offset) % 16 == 8 {
+		if (i32::try_from(offt).unwrap() + self.stack_offset) % 16 == 8 {
 			dynasm!(self.jit
 				; push rbx
 			);

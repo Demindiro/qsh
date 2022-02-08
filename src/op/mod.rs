@@ -11,7 +11,6 @@ pub use parse::ParseError;
 use crate::runtime::QFunction;
 use crate::token::Token;
 use bitflags::bitflags;
-use core::iter::Peekable;
 use std::collections::BTreeMap;
 
 #[derive(Debug, PartialEq)]
@@ -70,7 +69,7 @@ pub struct OpTree<'a> {
 impl<'a> OpTree<'a> {
 	/// Convert an iterator of tokens to an [`OpTree`].
 	#[inline(always)]
-	pub fn new<I, F>(mut tokens: I, resolve_fn: F) -> Result<Self, ParseError>
+	pub fn new<I, F>(tokens: I, resolve_fn: F) -> Result<Self, ParseError>
 	where
 		I: Iterator<Item = Token<'a>>,
 		F: Fn(&str) -> Option<QFunction>,

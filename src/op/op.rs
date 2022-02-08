@@ -1,6 +1,5 @@
 use super::{Expression, ForRange, RegisterIndex};
 use crate::runtime::QFunction;
-use core::fmt;
 
 #[derive(PartialEq, Debug)]
 pub enum Op<'a> {

@@ -1,13 +1,11 @@
 #[cfg(target_arch = "x86_64")]
 mod x64;
 
-use crate::op::{self, Expression, ForRange, Op, OpTree, RegisterIndex};
+use crate::op::OpTree;
 use crate::runtime::*;
-use core::cell::Cell;
-use core::fmt;
 use core::mem;
 use dynasmrt::{AssemblyOffset, ExecutableBuffer};
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 /// A JIT-compiled function that can be called.
@@ -50,7 +48,7 @@ where
 #[cfg(test)]
 mod test {
 	use super::{Function, *};
-	use crate::op::*;
+
 	use crate::token::*;
 	use crate::wrap_ffi;
 	use core::cell::RefCell;
@@ -60,7 +58,7 @@ mod test {
 		static COUNTER: RefCell<usize> = RefCell::default();
 	}
 
-	fn print(args: &[TValue], out: &mut [OutValue<'_>], inv: &[InValue<'_>]) -> isize {
+	fn print(args: &[TValue], out: &mut [OutValue<'_>], _inv: &[InValue<'_>]) -> isize {
 		let it = args
 			.iter()
 			.map(|v| v.to_string().chars().collect::<Vec<_>>())

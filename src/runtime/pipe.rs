@@ -3,7 +3,7 @@ use core::ops::Deref;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::io::{self, Read};
-use std::process::{ChildStderr, ChildStdin, ChildStdout};
+use std::process::{ChildStderr, ChildStdout};
 use std::sync::{Mutex, MutexGuard};
 
 enum Input {

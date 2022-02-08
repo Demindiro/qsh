@@ -1,3 +1,4 @@
+#![allow(unused_unsafe)]
 #![feature(const_discriminant)]
 #![feature(const_refs_to_cell)]
 #![feature(core_intrinsics)]

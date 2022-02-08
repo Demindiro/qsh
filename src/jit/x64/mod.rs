@@ -7,11 +7,11 @@ use super::Function;
 use crate::op::{self, Expression, ForRange, Op, OpTree, RegisterIndex};
 use crate::runtime::*;
 use core::cell::Cell;
-use core::fmt;
+
 use core::mem;
 use dynasmrt::x64;
-use dynasmrt::{dynasm, AssemblyOffset, DynasmApi, DynasmLabelApi, ExecutableBuffer, Register};
-use std::collections::{btree_map::Entry, BTreeMap};
+use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi, Register};
+use std::collections::BTreeMap;
 #[cfg(feature = "iced")]
 use std::rc::Rc;
 
@@ -61,7 +61,7 @@ where
 		functions: BTreeMap<&'a str, op::Function<'a>>,
 	) -> Self {
 		let mut jit = dynasmrt::x64::Assembler::new().unwrap();
-		let mut s = Self {
+		Self {
 			data: Default::default(),
 			resolve_fn,
 			strings: Default::default(),
@@ -77,8 +77,7 @@ where
 				.map(|(k, v)| (k, (v, jit.new_dynamic_label())))
 				.collect(),
 			jit,
-		};
-		s
+		}
 	}
 
 	/// Insert the common function prologue.

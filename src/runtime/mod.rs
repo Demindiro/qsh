@@ -344,6 +344,16 @@ wrap_ffi!(pub FFI_PRINT = print);
 wrap_ffi!(pub FFI_EXEC  = exec );
 wrap_ffi!(pub FFI_SPLIT = split);
 
+/// Resolve a function by name.
+pub fn resolve_fn(f: &str) -> Option<QFunction> {
+	match f {
+		"print" => Some(FFI_PRINT),
+		"exec" => Some(FFI_EXEC),
+		"split" => Some(FFI_SPLIT),
+		_ => None,
+	}
+}
+
 #[cfg(test)]
 mod test {
 	use super::*;

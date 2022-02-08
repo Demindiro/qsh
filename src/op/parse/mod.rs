@@ -1,9 +1,11 @@
 mod reduce;
+mod validate;
 
 use super::{Expression, ForRange, Function, Op, Register, RegisterIndex, Types};
 use crate::runtime::QFunction;
 use crate::token::Token;
 use core::iter::Peekable;
+use core::mem;
 use std::collections::BTreeMap;
 
 /// A token to AST converter.
@@ -51,10 +53,26 @@ where
 			u16::try_from(s.registers.len()).is_ok(),
 			"too many registers used"
 		);
-		Ok((s.reduce(ops), s))
+		let ops = s.reduce(ops);
+		// TODO horribly inefficient
+		for name in s
+			.functions
+			.as_ref()
+			.unwrap()
+			.keys()
+			.copied()
+			.collect::<Vec<_>>()
+		{
+			let ops = mem::take(&mut s.functions.as_mut().unwrap().get_mut(name).unwrap().ops);
+			let ops = s.reduce(ops);
+			s.functions.as_mut().unwrap().get_mut(name).unwrap().ops = ops;
+		}
+		s.validate(&*ops).map(|()| (ops, s))
 	}
 
 	/// Convert tokens that describe function. This *excludes* the `fn` keyword.
+	///
+	/// This function does *not* apply reduce or perform validation.
 	pub fn parse_function<I>(
 		tokens: &mut Peekable<I>,
 		resolve_fn: F,
@@ -105,7 +123,6 @@ where
 			Expression::Statement(ops) => ops,
 			Expression::Integer(_) | Expression::String(_) | Expression::Variable(_) => [].into(),
 		};
-		let ops = func.reduce(ops);
 		let func = Function {
 			arguments: args.into(),
 			pipe_in: pipe_in.into(),
@@ -351,4 +368,7 @@ pub enum ParseError {
 	UnexpectedToken,
 	CantNestFunctions,
 	FunctionAlreadyDefined,
+	ArgumentMismatch,
+	PipeInMismatch,
+	PipeOutMismatch,
 }

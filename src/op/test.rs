@@ -11,8 +11,12 @@ fn resolve_fn(f: &str) -> Option<QFunction> {
 	}
 }
 
-fn parse(s: &str) -> OpTree<'_> {
-	OpTree::new(TokenParser::new(s).map(Result::unwrap), resolve_fn).unwrap()
+pub(super) fn try_parse(s: &str) -> Result<OpTree<'_>, ParseError> {
+	OpTree::new(TokenParser::new(s).map(Result::unwrap), resolve_fn)
+}
+
+pub(super) fn parse(s: &str) -> OpTree<'_> {
+	try_parse(s).unwrap()
 }
 
 /// Get exactly one register for a variable.

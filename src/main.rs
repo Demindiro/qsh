@@ -19,15 +19,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		.map(Result::unwrap)
 		.collect::<Vec<_>>();
 	//dbg!(&f);
-	let f = op::OpTree::new(f.into_iter()).unwrap();
+	let f = op::OpTree::new(f.into_iter(), resolve_fn).unwrap();
 	//dbg!(&f);
-	let f = jit::compile(f, |f| match f {
-		"print" => Some(runtime::ffi_print),
-		"exec" => Some(runtime::ffi_exec),
-		"split" => Some(runtime::ffi_split),
-		_ => None,
-	});
+	let f = jit::compile(f, resolve_fn);
 	//dbg!(&f);
 	f.call(&[]);
 	Ok(())
+}
+
+fn resolve_fn(f: &str) -> Option<runtime::QFunction> {
+	match f {
+		"print" => Some(runtime::FFI_PRINT),
+		"exec" => Some(runtime::FFI_EXEC),
+		"split" => Some(runtime::FFI_SPLIT),
+		_ => None,
+	}
 }

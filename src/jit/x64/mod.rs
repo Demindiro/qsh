@@ -176,17 +176,6 @@ where
 	}
 
 	fn finish(mut self) -> Function {
-		// Add common routines
-		dynasm!(self.jit
-			;; self.symbol("bad_argument_count")
-			; bad_argument_count:
-			// Checks are done before allocating on the stack, so no adjustment are needed.
-			// Shortest sequence to move -2 to rax
-			; push BYTE -2
-			; pop rax
-			; ret
-		);
-
 		// Add data
 		let data_offset = self.jit.offset();
 		dynasm!(self.jit
@@ -234,46 +223,64 @@ where
 			self.symbol(name);
 			// Arguments to this function are not checked during compile time, so check
 			// during runtime.
-			// arg registers in order: rdi, rsi, rdx, rcx, r8, r9
-			// arguments: argc, argv, outc, outb, inc, inv
+			// arguments: argv (rsi), outv (r8), inv (r9)
+			// Note that argv, outv and inv have a fixed size.
 			dynasm!(self.jit
 				; =>lbl
-				;; self.comment(|| "check argument count")
-				; cmp rdi, f.arguments.len().try_into().unwrap()
-				; jne >bad_argument_count
-				; test rdx, rdx // outc == 0 always for now.
-				; jne >bad_argument_count
-				; test r8, r8 // inc == 0 always for now.
-				; jne >bad_argument_count
-				;; self.comment(|| "preserve arg count")
-				; mov r11, rdi
-				;; self.comment(|| "adjust arg count ahead of time (avoid stall)")
-				; shl r11, 4
 			);
-			// Initialize virtual registers
+			// Initialize virtual registers (TODO in pipes)
 			self.registers = f.registers;
 			self.insert_prologue(f.arguments.len());
 			dynasm!(self.jit
 				;; self.comment(|| "copy arguments to virtual registers")
-				; sub rsp, r11
-				; mov rcx, r11
+				; mov ecx, (f.arguments.len() * 16).try_into().unwrap()
+				; sub rsp, rcx
 				; mov rdi, rsp
 				; rep movsb
-				;; self.comment(|| "preserve ")
+			);
+			dynasm!(self.jit
+				;; self.comment(|| "save out pipes pointer")
+				; push r8
+				;; self.stack_offset += 8
 			);
 			// Compile function itself
 			self.compile(f.ops);
 			// Copy virtual registers to out pipes and return
-			self.comment(|| "copy to out pipes");
+			dynasm!(self.jit
+				;; self.comment(|| "copy to out pipes")
+				; pop rsi
+				;; self.stack_offset -= 8
+			);
 			for &out in f.pipe_out.iter() {
 				// Find the last used register that corresponds to the out variable.
 				// If not found, just ignore it. The caller should have set it to nil anyways.
-				if let Some(r) = self.registers.iter().rev().find(|r| r.variable == out) {
+				if let Some(r) = self
+					.registers
+					.iter()
+					.enumerate()
+					.rev()
+					.find(|r| r.1.variable == out)
+				{
 					self.comment(|| "copy ".to_string() + out);
-					todo!("different function signature needed");
+					let offt = self.variable_offset(RegisterIndex(r.0 as u16));
+					dynasm!(self.jit
+						; mov rdi, [rsi]
+						;; self.comment(|| "skip if 0")
+						; test rdi, rdi
+						; jz BYTE >skip
+						; mov rcx, [rsp + offt    ]
+						; mov rdx, [rsp + offt + 8]
+						; mov [rdi    ], rcx
+						; mov [rdi + 8], rdx
+						;; self.symbol("skip")
+						; skip:
+					);
 				} else {
 					self.comment(|| "ignore ".to_string() + out);
 				}
+				dynasm!(self.jit
+					; add rsi, 8
+				);
 			}
 			self.insert_epilogue();
 		}
@@ -285,201 +292,25 @@ where
 				Op::Call {
 					function,
 					arguments,
-					pipe_out,
 					pipe_in,
-				} => {
-					self.comment(|| format!("call '{}'", &function));
-
-					enum Fn {
-						BuiltIn(QFunction),
-						User(dynasmrt::DynamicLabel),
-						Exec(QFunction),
-					}
-
-					// Resolve built-in function, user defined function or default to 'exec'
-					let f = (self.resolve_fn)(&*function)
-						.map(Fn::BuiltIn)
-						.or_else(|| self.functions.get(&function).map(|l| Fn::User(l.1)))
-						.or_else(|| (self.resolve_fn)("exec").map(Fn::Exec))
-						.expect("'exec' not defined");
-
-					// TODO should we clear pipe_out values before a call?
-
-					// The original stack offset, used to restore the stack.
-					let original_stack_offset = self.stack_offset;
-
-					// Create out list
-					self.comment(|| "out pipes");
-					let len = pipe_out.len().try_into().unwrap();
-					for (from, to) in pipe_out.into_vec() {
-						self.comment(|| format!("{} > @{}", from, self.reg_to_var(to)));
-						let str_offt = self.strings.len();
-						self.strings.push(from.len().try_into().unwrap());
-						self.strings.extend(from.bytes());
-						let offt = self.variable_offset(to);
-						dynasm!(self.jit
-							// value pointer
-							; lea rax, [rsp + offt]
-							; push rax
-							// name
-							; lea rax, [>strings + str_offt.try_into().unwrap()]
-							; push rax
-						);
-						self.stack_offset += 16;
-					}
-					dynasm!(self.jit
-						; mov edx, BYTE len
-						; mov rcx, rsp
-					);
-
-					// Create in list
-					self.comment(|| "in pipes");
-					let len = pipe_in.len().try_into().unwrap();
-					for (from, to) in pipe_in.into_vec() {
-						self.comment(|| format!("{} < @{}", to, self.reg_to_var(from)));
-						let str_offt = self.strings.len();
-						self.strings.push(to.len().try_into().unwrap());
-						self.strings.extend(to.bytes());
-						let offt = self.variable_offset(from).checked_add(8).unwrap();
-						dynasm!(self.jit
-							// value
-							; push QWORD [rsp + offt]
-							// value discriminant
-							; push QWORD [rsp + offt]
-							// name
-							; lea rax, [>strings + str_offt.try_into().unwrap()]
-							; push rax
-						);
-						self.stack_offset += 24;
-					}
-					dynasm!(self.jit
-						; mov r8, len
-						; mov r9, rsp
-					);
-
-					// Note start of data if all arguments are static. Also push program name
-					// if using 'exec'
-					let i = self.data.len();
-					let fn_str_val = if let Fn::Exec(_) = f {
-						let f = Value::String((&*function).into());
-						let fp = unsafe { core::mem::transmute_copy::<_, [i64; 2]>(&f) };
-						self.data.push(f);
-						Some(fp)
-					} else {
-						None
-					};
-					#[cfg(feature = "iced")]
-					match f {
-						Fn::User(_) => (),
-						Fn::BuiltIn(f) => self
-							.symbols
-							.entry(f as usize)
-							.or_default()
-							.push(function.into()),
-						Fn::Exec(f) => self
-							.symbols
-							.entry(f as usize)
-							.or_default()
-							.push("exec".into()),
-					}
-
-					// Figure out whether we need to use the stack.
-					let use_stack = arguments.iter().any(|a| match a {
-						Expression::Variable(_) => true,
-						_ => false,
-					});
-					let len = arguments.len() + fn_str_val.is_some().then(|| 1).unwrap_or(0);
-
-					// Create argument list
-					if use_stack {
-						self.comment(|| "dynamic args");
-
-						// Note that stack pushing is top-down
-						for a in arguments.into_vec().into_iter().rev() {
-							let v = match a {
-								Expression::String(s) => Value::String((&*s).into()),
-								Expression::Variable(v) => {
-									let offt = self.variable_offset(v);
-									// push decrements rsp before storing
-									let offt = offt.checked_add(8).unwrap();
-									dynasm!(self.jit
-										; push QWORD [rsp + offt]
-										; push QWORD [rsp + offt]
-									);
-									self.stack_offset += 16;
-									continue;
-								}
-								_ => todo!("argument {:?}", a),
-							};
-							self.stack_offset += self.push_stack_value((&v).into());
-							self.data.push(v);
-						}
-						if let Some([a, b]) = fn_str_val {
-							dynasm!(self.jit
-								; mov rax, QWORD b
-								; push rax
-								; mov rax, QWORD a
-								; push rax
-							);
-							self.stack_offset += 16;
-						}
-						if let Ok(n) = len.try_into() {
-							dynasm!(self.jit ; mov edi, DWORD n);
-						} else {
-							dynasm!(self.jit ; mov rdi, len.try_into().unwrap())
-						}
-						dynasm!(self.jit
-							; mov rsi, rsp
-						);
-					} else {
-						self.comment(|| "constant args");
-
-						// Push arguments
-						for a in arguments.into_vec() {
-							let v = match a {
-								Expression::String(s) => Value::String((&*s).into()),
-								Expression::Variable(_) => unreachable!(),
-								_ => todo!("argument {:?}", a),
-							};
-							self.data.push(v);
-						}
-						dynasm!(self.jit
-							; mov rdi, len.try_into().unwrap()
-							; lea rsi, [>data + (i * 16).try_into().unwrap()]
-						);
-					}
-
-					// Align stack to 16 bytes, then call
-					// Note that we didn't align the stack at the start of the function,
-					// so offset by 8
-					self.comment(|| "call");
-					if self.stack_offset % 16 != 8 {
-						dynasm!(self.jit ; push rbx);
-						self.stack_offset += 8;
-					}
-
-					match f {
-						Fn::User(f) => dynasm!(self.jit ; call => f),
-						Fn::BuiltIn(f) | Fn::Exec(f) => {
-							dynasm!(self.jit
-								; mov rax, QWORD f as _
-								; call rax
-							);
-						}
-					}
-
-					// Restore stack
-					let offset = self.stack_offset - original_stack_offset;
-					if let Ok(n) = offset.try_into() {
-						dynasm!(self.jit ; add rsp, BYTE n);
-					} else {
-						dynasm!(self.jit ; add rsp, offset);
-					}
-					self.stack_offset = original_stack_offset;
-
-					// @? is now useable
-					self.retval_defined = true;
-				}
+					pipe_out,
+				} => self.compile_local_call(function, arguments, pipe_in, pipe_out),
+				Op::CallBuiltin {
+					function,
+					arguments,
+					pipe_in,
+					pipe_out,
+				} => self.compile_builtin_call(function, arguments, pipe_in, pipe_out),
+				Op::Exec {
+					arguments,
+					pipe_in,
+					pipe_out,
+				} => self.compile_builtin_call(
+					(self.resolve_fn)("exec").expect("'exec' not defined"),
+					arguments,
+					pipe_in,
+					pipe_out,
+				),
 				Op::If {
 					condition,
 					if_true,
@@ -733,9 +564,275 @@ where
 					self.comment(|| format!("@{} = {:?}", self.reg_to_var(variable), expression));
 					self.set_variable(variable, expression)
 				}
-				op => todo!("parse {:?}", op),
 			}
 		}
+	}
+
+	/// Compile a call to a local user-defined function.
+	fn compile_local_call(
+		&mut self,
+		function: &str,
+		arguments: Box<[Expression<'_>]>,
+		pipe_in: Box<[(RegisterIndex, &str)]>,
+		pipe_out: Box<[(&str, RegisterIndex)]>,
+	) {
+		self.comment(|| format!("call '{}'", function));
+		let (func, _) = &self.functions[function];
+		// Verify if arguments, pipe_in and pipe_out are correct as we may
+		// not potentially cause UB in safe code.
+		assert_eq!(
+			func.arguments.len(),
+			arguments.len(),
+			"argument mismatch (bug in op parser)"
+		);
+		assert_eq!(
+			func.pipe_in.len(),
+			pipe_in.len(),
+			"pipe_in mismatch (bug in op parser)"
+		);
+		assert_eq!(
+			func.pipe_out.len(),
+			pipe_out.len(),
+			"pipe_out mismatch (bug in op parser)"
+		);
+
+		// Calling convention: argv (rsi), outv (r8), inv (r9)
+
+		let original_stack_offset = self.stack_offset;
+
+		// Push args
+		self.comment(|| "args");
+		for a in arguments.into_vec().into_iter().rev() {
+			let v = match a {
+				Expression::String(s) => Value::String((&*s).into()),
+				Expression::Variable(v) => {
+					let offt = self.variable_offset(v);
+					// push decrements rsp before storing
+					let offt = offt.checked_add(8).unwrap();
+					dynasm!(self.jit
+						; push QWORD [rsp + offt]
+						; push QWORD [rsp + offt]
+					);
+					self.stack_offset += 16;
+					continue;
+				}
+				_ => todo!("argument {:?}", a),
+			};
+			self.stack_offset += self.push_stack_value((&v).into());
+			self.data.push(v);
+		}
+		dynasm!(self.jit
+			; mov rsi, rsp
+		);
+
+		// Push pipe out
+		self.comment(|| "pipe out");
+		let (func, lbl) = &self.functions[function];
+		'out: for (from, to) in pipe_out.into_vec().into_iter().rev() {
+			for &out in func.pipe_out.iter() {
+				if from == out {
+					let offt = self.variable_offset(to);
+					dynasm!(self.jit
+						; lea rax, [rsp + offt]
+						; push rax
+						;; self.stack_offset += 8
+					);
+					continue 'out;
+				}
+			}
+			dynasm!(self.jit
+				; push 0
+				;; self.stack_offset += 8
+			);
+		}
+		dynasm!(self.jit
+			; mov r8, rsp
+		);
+
+		// Push pipe in
+		self.comment(|| "pipe in");
+		for a in pipe_in.into_vec() {
+			dynasm!(self.jit
+				; push 0
+				; push 0
+				; push 0
+			);
+			self.stack_offset += 24;
+		}
+		dynasm!(self.jit
+			; mov r9, rsp
+		);
+
+		// Align stack
+		if self.stack_offset % 16 != 8 {
+			dynasm!(self.jit
+				; push rbx
+			);
+			self.stack_offset += 8;
+		}
+
+		// Call
+		dynasm!(self.jit
+			;; self.comment(|| "call")
+			; call =>*lbl
+		);
+
+		// Restore stack
+		dynasm!(self.jit
+			; add rsp, self.stack_offset - original_stack_offset
+		);
+		self.stack_offset = original_stack_offset;
+	}
+
+	/// Compile a call to a function.
+	fn compile_builtin_call(
+		&mut self,
+		function: QFunction,
+		arguments: Box<[Expression<'_>]>,
+		pipe_in: Box<[(RegisterIndex, &str)]>,
+		pipe_out: Box<[(&str, RegisterIndex)]>,
+	) {
+		self.comment(|| format!("call {:?}", &function));
+
+		// TODO should we clear pipe_out values before a call?
+
+		// The original stack offset, used to restore the stack.
+		let original_stack_offset = self.stack_offset;
+
+		// Create out list
+		self.comment(|| "out pipes");
+		let len = pipe_out.len().try_into().unwrap();
+		for (from, to) in pipe_out.into_vec() {
+			self.comment(|| format!("{} > @{}", from, self.reg_to_var(to)));
+			let str_offt = self.strings.len();
+			self.strings.push(from.len().try_into().unwrap());
+			self.strings.extend(from.bytes());
+			let offt = self.variable_offset(to);
+			dynasm!(self.jit
+				// value pointer
+				; lea rax, [rsp + offt]
+				; push rax
+				// name
+				; lea rax, [>strings + str_offt.try_into().unwrap()]
+				; push rax
+			);
+			self.stack_offset += 16;
+		}
+		dynasm!(self.jit
+			; mov edx, BYTE len
+			; mov rcx, rsp
+		);
+
+		// Create in list
+		self.comment(|| "in pipes");
+		let len = pipe_in.len().try_into().unwrap();
+		for (from, to) in pipe_in.into_vec() {
+			self.comment(|| format!("{} < @{}", to, self.reg_to_var(from)));
+			let str_offt = self.strings.len();
+			self.strings.push(to.len().try_into().unwrap());
+			self.strings.extend(to.bytes());
+			let offt = self.variable_offset(from).checked_add(8).unwrap();
+			dynasm!(self.jit
+				// value
+				; push QWORD [rsp + offt]
+				// value discriminant
+				; push QWORD [rsp + offt]
+				// name
+				; lea rax, [>strings + str_offt.try_into().unwrap()]
+				; push rax
+			);
+			self.stack_offset += 24;
+		}
+		dynasm!(self.jit
+			; mov r8, len
+			; mov r9, rsp
+		);
+
+		// Note start of data if all arguments are static.
+		let i = self.data.len();
+
+		// Figure out whether we need to use the stack.
+		let use_stack = arguments.iter().any(|a| match a {
+			Expression::Variable(_) => true,
+			_ => false,
+		});
+		let len = arguments.len();
+
+		// Create argument list
+		if use_stack {
+			self.comment(|| "dynamic args");
+
+			// Note that stack pushing is top-down
+			for a in arguments.into_vec().into_iter().rev() {
+				let v = match a {
+					Expression::String(s) => Value::String((&*s).into()),
+					Expression::Variable(v) => {
+						let offt = self.variable_offset(v);
+						// push decrements rsp before storing
+						let offt = offt.checked_add(8).unwrap();
+						dynasm!(self.jit
+							; push QWORD [rsp + offt]
+							; push QWORD [rsp + offt]
+						);
+						self.stack_offset += 16;
+						continue;
+					}
+					_ => todo!("argument {:?}", a),
+				};
+				self.stack_offset += self.push_stack_value((&v).into());
+				self.data.push(v);
+			}
+			if let Ok(n) = len.try_into() {
+				dynasm!(self.jit ; mov edi, DWORD n);
+			} else {
+				dynasm!(self.jit ; mov rdi, len.try_into().unwrap())
+			}
+			dynasm!(self.jit
+				; mov rsi, rsp
+			);
+		} else {
+			self.comment(|| "constant args");
+
+			// Push arguments
+			for a in arguments.into_vec() {
+				let v = match a {
+					Expression::String(s) => Value::String((&*s).into()),
+					Expression::Variable(_) => unreachable!(),
+					_ => todo!("argument {:?}", a),
+				};
+				self.data.push(v);
+			}
+			dynasm!(self.jit
+				; mov rdi, len.try_into().unwrap()
+				; lea rsi, [>data + (i * 16).try_into().unwrap()]
+			);
+		}
+
+		// Align stack to 16 bytes, then call
+		// Note that we didn't align the stack at the start of the function,
+		// so offset by 8
+		self.comment(|| "call");
+		if self.stack_offset % 16 != 8 {
+			dynasm!(self.jit ; push rbx);
+			self.stack_offset += 8;
+		}
+
+		dynasm!(self.jit
+			; mov rax, QWORD function.0 as _
+			; call rax
+		);
+
+		// Restore stack
+		let offset = self.stack_offset - original_stack_offset;
+		if let Ok(n) = offset.try_into() {
+			dynasm!(self.jit ; add rsp, BYTE n);
+		} else {
+			dynasm!(self.jit ; add rsp, offset);
+		}
+		self.stack_offset = original_stack_offset;
+
+		// @? is now useable
+		self.retval_defined = true;
 	}
 
 	fn set_variable(&mut self, var: RegisterIndex, expression: Expression) {

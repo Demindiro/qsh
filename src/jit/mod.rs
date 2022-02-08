@@ -137,9 +137,9 @@ mod test {
 		})
 	}
 
-	wrap_ffi!(ffi_print = print);
-	wrap_ffi!(ffi_exec = exec);
-	wrap_ffi!(ffi_count_to_10 = count_to_10);
+	wrap_ffi!(FFI_PRINT = print);
+	wrap_ffi!(FFI_EXEC = exec);
+	wrap_ffi!(FFI_COUNT_TO_10 = count_to_10);
 
 	fn clear_out() {
 		OUT.with(|out| out.borrow_mut().clear());
@@ -148,16 +148,16 @@ mod test {
 
 	fn resolve_fn(f: &str) -> Option<QFunction> {
 		match f {
-			"print" => Some(ffi_print),
-			"exec" => Some(ffi_exec),
-			"split" => Some(ffi_split),
-			"count_to_10" => Some(ffi_count_to_10),
+			"print" => Some(FFI_PRINT),
+			"exec" => Some(FFI_EXEC),
+			"split" => Some(FFI_SPLIT),
+			"count_to_10" => Some(FFI_COUNT_TO_10),
 			_ => None,
 		}
 	}
 
 	fn compile(s: &str) -> Function {
-		let ops = OpTree::new(TokenParser::new(s).map(Result::unwrap)).unwrap();
+		let ops = OpTree::new(TokenParser::new(s).map(Result::unwrap), resolve_fn).unwrap();
 		super::compile(ops, resolve_fn)
 	}
 
@@ -298,7 +298,7 @@ mod test {
 
 	#[test]
 	fn function_pipe_out() {
-		run("fn foo a >x; print @a >x; foo abracadabra >; print its @?");
-		OUT.with(|out| assert_eq!("its abracadabra\n", &*out.borrow()));
+		run("fn foo a >x; print @a >x; foo abracadabra x>; print its @");
+		OUT.with(|out| assert_eq!("its abracadabra\n\n", &*out.borrow()));
 	}
 }

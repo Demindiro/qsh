@@ -1,13 +1,17 @@
-use super::{Expression, Function, Op, Register, RegisterIndex, Types, ForRange};
-use std::collections::BTreeMap;
+mod reduce;
+
+use super::{Expression, ForRange, Function, Op, Register, RegisterIndex, Types};
+use crate::runtime::QFunction;
 use crate::token::Token;
 use core::iter::Peekable;
+use std::collections::BTreeMap;
 
 /// A token to AST converter.
 #[derive(Debug)]
-pub(super) struct Parser<'a> {
-	/// The "opcode" tree.
-	pub ops: Box<[Op<'a>]>,
+pub(super) struct Parser<'a, F>
+where
+	F: (Fn(&str) -> Option<QFunction>) + Clone,
+{
 	/// A list of registers to their corresponding variables.
 	///
 	/// There may be multiple registers per variable.
@@ -18,33 +22,42 @@ pub(super) struct Parser<'a> {
 	pub functions: Option<BTreeMap<&'a str, Function<'a>>>,
 	/// How many layers of loops we are in.
 	loop_depth: usize,
+	/// Built-in function resolver.
+	resolve_fn: F,
 }
 
-impl<'a> Parser<'a> {
+impl<'a, F> Parser<'a, F>
+where
+	F: (Fn(&str) -> Option<QFunction>) + Clone,
+{
 	/// Convert a series of tokens in a script.
-	pub fn parse_script<I>(tokens: &mut Peekable<I>) -> Result<Self, ParseError>
+	pub fn parse_script<I>(
+		tokens: &mut Peekable<I>,
+		resolve_fn: F,
+	) -> Result<(Box<[Op<'a>]>, Self), ParseError>
 	where
 		I: Iterator<Item = Token<'a>>,
 	{
 		let mut s = Self {
-			ops: Default::default(),
 			registers: Default::default(),
 			functions: Some(Default::default()),
 			loop_depth: 0,
+			resolve_fn,
 		};
-		s.ops = s
+		let ops = s
 			.parse_inner(Default::default(), &mut tokens.peekable(), false)?
 			.into();
 		assert!(
 			u16::try_from(s.registers.len()).is_ok(),
 			"too many registers used"
 		);
-		Ok(s)
+		Ok((s.reduce(ops), s))
 	}
 
 	/// Convert tokens that describe function. This *excludes* the `fn` keyword.
 	pub fn parse_function<I>(
 		tokens: &mut Peekable<I>,
+		resolve_fn: F,
 	) -> Result<(&'a str, Function<'a>), ParseError>
 	where
 		I: Iterator<Item = Token<'a>>,
@@ -82,16 +95,17 @@ impl<'a> Parser<'a> {
 			.collect();
 		// Create new tree for function (with separate variables etc).
 		let mut func = Parser {
-			ops: Default::default(),
 			registers,
 			functions: Default::default(),
 			loop_depth: 0,
+			resolve_fn,
 		};
 		// Parse function body
 		let ops = match func.parse_expr(tokens)? {
 			Expression::Statement(ops) => ops,
 			Expression::Integer(_) | Expression::String(_) | Expression::Variable(_) => [].into(),
 		};
+		let ops = func.reduce(ops);
 		let func = Function {
 			arguments: args.into(),
 			pipe_in: pipe_in.into(),
@@ -277,9 +291,13 @@ impl<'a> Parser<'a> {
 				}
 				Token::Separator => {}
 				Token::Function => {
-					let f = self.functions.as_mut().ok_or(ParseError::CantNestFunctions)?;
-					let (name, func) = Self::parse_function(tokens)?;
-					f.try_insert(name, func).map_err(|_| ParseError::FunctionAlreadyDefined)?;
+					let f = self
+						.functions
+						.as_mut()
+						.ok_or(ParseError::CantNestFunctions)?;
+					let (name, func) = Self::parse_function(tokens, self.resolve_fn.clone())?;
+					f.try_insert(name, func)
+						.map_err(|_| ParseError::FunctionAlreadyDefined)?;
 				}
 				t => todo!("parse {:?}", t),
 			}

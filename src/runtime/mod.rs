@@ -14,14 +14,32 @@ use core::slice;
 use core::str;
 
 pub type ValueDiscriminant = usize;
-pub type QFunction = for<'a> extern "C" fn(
-	usize,
-	*const TValue,
-	usize,
-	*mut OutValue<'a>,
-	usize,
-	*const InValue<'a>,
-) -> isize;
+
+#[derive(Clone, Copy)]
+pub struct QFunction(
+	pub(crate)  for<'a> extern "C" fn(
+		usize,
+		*const TValue,
+		usize,
+		*mut OutValue<'a>,
+		usize,
+		*const InValue<'a>,
+	) -> isize,
+);
+
+impl PartialEq for QFunction {
+	fn eq(&self, rhs: &Self) -> bool {
+		self.0 as usize == rhs.0 as usize
+	}
+}
+
+impl Eq for QFunction {}
+
+impl fmt::Debug for QFunction {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{:p}", self.0 as *const ())
+	}
+}
 
 #[derive(Clone, Debug)]
 pub enum Value {
@@ -167,29 +185,26 @@ impl fmt::Debug for InValue<'_> {
 
 #[macro_export]
 macro_rules! wrap_ffi {
-	($new_fn:ident = $fn:ident) => {
-		wrap_ffi!(@INTERNAL [] $new_fn = $fn);
-	};
-	(pub $new_fn:ident = $fn:ident) => {
-		wrap_ffi!(@INTERNAL [pub] $new_fn = $fn);
-	};
-	(@INTERNAL [$($vis:ident)*] $new_fn:ident = $fn:ident) => {
-		$($vis)* extern "C" fn $new_fn(argc: usize, argv: *const TValue, outc: usize, outv: *mut OutValue<'_>, inc: usize, inv: *const InValue<'_>) -> isize {
-			unsafe {
-				use core::slice::{from_raw_parts, from_raw_parts_mut};
-				debug_assert!(!argv.is_null());
-				debug_assert!(!outv.is_null());
-				debug_assert!(!inv.is_null());
-				let f = || $fn(from_raw_parts(argv, argc), from_raw_parts_mut(outv, outc), from_raw_parts(inv, inc));
-				if cfg!(feature = "catch_unwind") {
-					// EX_SOFTWARE is 70. Use -70 to indicate internal software in built-in
-					// function for now.
-					std::panic::catch_unwind(f).unwrap_or(-70)
-				} else {
-					f()
+	($vis:vis $qfn:ident = $fn:ident) => {
+		$vis const $qfn: QFunction = QFunction({
+			extern "C" fn g(argc: usize, argv: *const TValue, outc: usize, outv: *mut OutValue<'_>, inc: usize, inv: *const InValue<'_>) -> isize {
+				unsafe {
+					use core::slice::{from_raw_parts, from_raw_parts_mut};
+					debug_assert!(!argv.is_null());
+					debug_assert!(!outv.is_null());
+					debug_assert!(!inv.is_null());
+					let f = || $fn(from_raw_parts(argv, argc), from_raw_parts_mut(outv, outc), from_raw_parts(inv, inc));
+					if cfg!(feature = "catch_unwind") {
+						// EX_SOFTWARE is 70. Use -70 to indicate internal software in built-in
+						// function for now.
+						std::panic::catch_unwind(f).unwrap_or(-70)
+					} else {
+						f()
+					}
 				}
 			}
-		}
+			g
+		});
 	};
 }
 
@@ -325,9 +340,9 @@ pub fn split(args: &[TValue], out: &mut [OutValue], inv: &[InValue<'_>]) -> isiz
 	0
 }
 
-wrap_ffi!(pub ffi_print = print);
-wrap_ffi!(pub ffi_exec  = exec );
-wrap_ffi!(pub ffi_split = split);
+wrap_ffi!(pub FFI_PRINT = print);
+wrap_ffi!(pub FFI_EXEC  = exec );
+wrap_ffi!(pub FFI_SPLIT = split);
 
 #[cfg(test)]
 mod test {

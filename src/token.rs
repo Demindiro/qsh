@@ -13,6 +13,7 @@ pub enum Token<'a> {
 	PipeOut { from: &'a str, to: &'a str },
 	PipeIn { to: &'a str, from: &'a str },
 	Separator,
+	Function,
 }
 
 pub struct TokenParser<'a> {
@@ -98,7 +99,8 @@ impl<'a> TokenParser<'a> {
 	fn pop(&mut self) -> Option<Token<'a>> {
 		let f = |t| {
 			match t {
-				Token::Word(s) if s == "" => None,
+				Token::Word("") => None,
+				Token::Word("fn") => Some(Token::Function),
 				Token::Separator if self.last_was_separator => None,
 				Token::Word(s) if let Some((from, to)) = s.split_once('>') => {
 					Some(Token::PipeOut { from, to })
@@ -329,6 +331,34 @@ print \"Don't ignore me!\" # Do ignore this though
 			Token::Word("a"),
 			Token::Separator,
 			Token::BlockClose,
+			Token::Separator,
+		];
+		cmp(s, &t);
+	}
+
+	#[test]
+	fn function() {
+		let s = "fn foo; bar";
+		let t = [
+			Token::Function,
+			Token::Word("foo"),
+			Token::Separator,
+			Token::Word("bar"),
+			Token::Separator,
+		];
+		cmp(s, &t);
+	}
+
+	#[test]
+	fn function_args() {
+		let s = "fn foo x y; bar";
+		let t = [
+			Token::Function,
+			Token::Word("foo"),
+			Token::Word("x"),
+			Token::Word("y"),
+			Token::Separator,
+			Token::Word("bar"),
 			Token::Separator,
 		];
 		cmp(s, &t);

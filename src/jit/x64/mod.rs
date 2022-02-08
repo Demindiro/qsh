@@ -1,35 +1,16 @@
+use super::Function;
 use crate::op::{self, Expression, ForRange, Op, OpTree, RegisterIndex};
-use core::cell::Cell;
 use crate::runtime::*;
+use core::cell::Cell;
 use core::fmt;
 use core::mem;
-#[cfg(target_arch = "x86_64")]
 use dynasmrt::x64;
 use dynasmrt::{dynasm, AssemblyOffset, DynasmApi, DynasmLabelApi, ExecutableBuffer, Register};
 use std::collections::{btree_map::Entry, BTreeMap};
 use std::rc::Rc;
 
-/// A JIT-compiled function that can be called.
-pub struct Function {
-	exec: ExecutableBuffer,
-	data_offset: AssemblyOffset,
-	#[cfg(feature = "iced")]
-	symbols: Rc<BTreeMap<usize, Vec<Box<str>>>>,
-	#[cfg(feature = "iced")]
-	comments: BTreeMap<usize, String>,
-}
-
-impl Function {
-	pub fn call(&self, _args: &[TValue]) {
-		unsafe {
-			let f: extern "C" fn() = mem::transmute(self.exec.ptr(AssemblyOffset(0)));
-			f()
-		}
-	}
-}
-
+#[cfg(feature = "iced")]
 impl fmt::Debug for Function {
-	#[cfg(feature = "iced")]
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		use iced_x86::{
 			Decoder, Formatter, FormatterTextKind, Instruction, IntelFormatter, SymResString,
@@ -97,31 +78,24 @@ impl fmt::Debug for Function {
 		}
 		Ok(())
 	}
-
-	#[cfg(not(feature = "iced"))]
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		f.debug_struct(stringify!(Function)).finish_non_exhaustive()
-	}
-}
-
-/// Compile an opcode tree to native machine-code.
-pub fn compile<F>(ops: OpTree<'_>, resolve_fn: F) -> Function
-where
-	F: Fn(&str) -> Option<QFunction>,
-{
-	#[cfg(target_arch = "x86_64")]
-	return compile_x64(ops, resolve_fn);
-	#[cfg(not(any(target_arch = "x86_64")))]
-	compile_error!("unsupported architecture");
 }
 
 #[cfg(target_arch = "x86_64")]
-fn compile_x64<F>(ops: OpTree<'_>, resolve_fn: F) -> Function
+pub(super) fn compile<F>(ops: OpTree<'_>, resolve_fn: F) -> Function
 where
 	F: Fn(&str) -> Option<QFunction>,
 {
-	let mut jit = X64Compiler::new(resolve_fn, ops.registers.into());
+	let mut jit = X64Compiler::new(resolve_fn, ops.registers.into(), ops.functions);
+
+	// main function
+	jit.insert_prologue(0);
 	jit.compile(ops.ops);
+	jit.insert_epilogue();
+
+	// user defined functions
+	jit.compile_functions();
+
+	// small routines + data
 	jit.finish()
 }
 
@@ -141,6 +115,7 @@ where
 	comments: Cell<BTreeMap<usize, String>>,
 	stack_offset: i32,
 	registers: Box<[op::Register<'a>]>,
+	functions: BTreeMap<&'a str, (op::Function<'a>, dynasmrt::DynamicLabel)>,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -148,9 +123,13 @@ impl<'a, F> X64Compiler<'a, F>
 where
 	F: Fn(&str) -> Option<QFunction>,
 {
-	fn new(resolve_fn: F, registers: Box<[op::Register<'a>]>) -> Self {
+	fn new(
+		resolve_fn: F,
+		registers: Box<[op::Register<'a>]>,
+		functions: BTreeMap<&'a str, op::Function<'a>>,
+	) -> Self {
+		let mut jit = dynasmrt::x64::Assembler::new().unwrap();
 		let mut s = Self {
-			jit: dynasmrt::x64::Assembler::new().unwrap(),
 			data: Default::default(),
 			resolve_fn,
 			strings: Default::default(),
@@ -161,26 +140,42 @@ where
 			comments: Default::default(),
 			stack_offset: 0,
 			registers,
+			functions: functions
+				.into_iter()
+				.map(|(k, v)| (k, (v, jit.new_dynamic_label())))
+				.collect(),
+			jit,
 		};
-		let l = (s.registers.len() * 16).try_into().unwrap();
-		dynasm!(s.jit
+		s
+	}
+
+	/// Insert the common function prologue.
+	fn insert_prologue(&mut self, argument_count: usize) {
+		let l = ((self.registers.len() - argument_count) * 16)
+			.try_into()
+			.unwrap();
+		dynasm!(self.jit
+			;; self.comment(|| "set non-arg registers to nil")
 			; mov ecx, l
 			; xor eax, eax
 			; sub rsp, rcx
 			; mov rdi, rsp
 			; rep stosb
 		);
-		s
 	}
 
-	fn finish(mut self) -> Function {
+	/// Insert the common function epilogue.
+	fn insert_epilogue(&mut self) {
 		assert_eq!(self.stack_offset, 0, "stack is not properly restored");
 		dynasm!(self.jit
 			;; self.comment(|| "return")
+			// stack OOB check was already done in insert_prologue, so just cast
 			; add rsp, (self.registers.len() * 16) as i32
 			; ret
 		);
+	}
 
+	fn finish(mut self) -> Function {
 		// Add data
 		let data_offset = self.jit.offset();
 		dynasm!(self.jit
@@ -221,184 +216,95 @@ where
 		}
 	}
 
+	/// Compile all functions.
+	fn compile_functions(&mut self) {
+		for (name, (f, lbl)) in mem::take(&mut self.functions).into_iter() {
+			assert_eq!(self.stack_offset, 0, "stack is not properly restored");
+			self.symbol(name);
+			// Arguments to this function are not checked during compile time, so check
+			// during runtime.
+			// arguments: argv + inv + other virt regs + outv (rsp + 8)
+			// Note that argv, outv and inv have a fixed size.
+			// Registers space is allocated by the caller.
+			dynasm!(self.jit
+				; =>lbl
+				// Registers are already initialized by the caller, so don't use standard prologue
+				// Account for return address
+				;; self.stack_offset += 8
+			);
+
+			self.registers = f.registers;
+			self.compile(f.ops);
+
+			// Copy virtual registers to out pipes and return
+			dynasm!(self.jit
+				;; self.comment(|| "copy to out pipes")
+				; lea rsi, [rsp + i32::try_from(self.registers.len() * 16).unwrap() + self.stack_offset]
+			);
+			for &out in f.pipe_out.iter() {
+				// Find the last used register that corresponds to the out variable.
+				// If not found, just ignore it. The caller should have set it to nil anyways.
+				if let Some(r) = self
+					.registers
+					.iter()
+					.enumerate()
+					.rev()
+					.find(|r| r.1.variable == out)
+				{
+					self.comment(|| "copy ".to_string() + out);
+					let offt = self.variable_offset(RegisterIndex(r.0 as u16));
+					dynasm!(self.jit
+						; mov rdi, [rsi]
+						;; self.comment(|| "skip if 0")
+						; test rdi, rdi
+						; jz BYTE >skip
+						; mov rcx, [rsp + offt    ]
+						; mov rdx, [rsp + offt + 8]
+						; mov [rdi    ], rcx
+						; mov [rdi + 8], rdx
+						;; self.symbol("skip")
+						; skip:
+					);
+				} else {
+					self.comment(|| "ignore ".to_string() + out);
+				}
+				dynasm!(self.jit
+					; add rsi, 8
+				);
+			}
+			// Registers are already initialized by the caller, so don't use standard epilogue
+			dynasm!(self.jit
+				; ret
+				;; self.stack_offset -= 8
+			);
+		}
+	}
+
 	fn compile(&mut self, ops: Box<[Op<'a>]>) {
 		for op in ops.into_vec() {
 			match op {
 				Op::Call {
 					function,
 					arguments,
-					pipe_out,
 					pipe_in,
-				} => {
-					self.comment(|| format!("call '{}'", &function));
-					// Resolve function or default to 'exec'
-					let (f, push_fn_name) = (self.resolve_fn)(&*function)
-						.map(|f| (f, false))
-						.or_else(|| (self.resolve_fn)("exec").map(|f| (f, true)))
-						.expect("'exec' not defined");
-
-					// TODO should we clear pipe_out values before a call?
-
-					// The original stack offset, used to restore the stack.
-					let original_stack_offset = self.stack_offset;
-
-					// Create out list
-					self.comment(|| "out pipes");
-					let len = pipe_out.len().try_into().unwrap();
-					for (from, to) in pipe_out.into_vec() {
-						self.comment(|| format!("{} > @{}", from, self.reg_to_var(to)));
-						let str_offt = self.strings.len();
-						self.strings.push(from.len().try_into().unwrap());
-						self.strings.extend(from.bytes());
-						let offt = self.variable_offset(to);
-						dynasm!(self.jit
-							// value pointer
-							; lea rax, [rsp + offt]
-							; push rax
-							// name
-							; lea rax, [>strings + str_offt.try_into().unwrap()]
-							; push rax
-						);
-						self.stack_offset += 16;
-					}
-					dynasm!(self.jit
-						; mov edx, BYTE len
-						; mov rcx, rsp
-					);
-
-					// Create in list
-					self.comment(|| "in pipes");
-					let len = pipe_in.len().try_into().unwrap();
-					for (from, to) in pipe_in.into_vec() {
-						self.comment(|| format!("{} < @{}", to, self.reg_to_var(from)));
-						let str_offt = self.strings.len();
-						self.strings.push(to.len().try_into().unwrap());
-						self.strings.extend(to.bytes());
-						let offt = self.variable_offset(from).checked_add(8).unwrap();
-						dynasm!(self.jit
-							// value
-							; push QWORD [rsp + offt]
-							// value discriminant
-							; push QWORD [rsp + offt]
-							// name
-							; lea rax, [>strings + str_offt.try_into().unwrap()]
-							; push rax
-						);
-						self.stack_offset += 24;
-					}
-					dynasm!(self.jit
-						; mov r8, len
-						; mov r9, rsp
-					);
-
-					// Note start of data if all arguments are static. Also push program name
-					// if using 'exec'
-					let i = self.data.len();
-					let fn_str_val = if push_fn_name {
-						let f = Value::String((&*function).into());
-						let fp = unsafe { core::mem::transmute_copy::<_, [i64; 2]>(&f) };
-						self.data.push(f);
-						Some(fp)
-					} else {
-						None
-					};
-					#[cfg(feature = "iced")]
-					self.symbols
-						.entry(f as usize)
-						.or_default()
-						.push(push_fn_name.then(|| "exec").unwrap_or(function).into());
-
-					// Figure out whether we need to use the stack.
-					let use_stack = arguments.iter().any(|a| match a {
-						Expression::Variable(_) => true,
-						_ => false,
-					});
-					let len = arguments.len() + push_fn_name.then(|| 1).unwrap_or(0);
-
-					// Create argument list
-					if use_stack {
-						self.comment(|| "dynamic args");
-
-						// Note that stack pushing is top-down
-						for a in arguments.into_vec().into_iter().rev() {
-							let v = match a {
-								Expression::String(s) => Value::String((&*s).into()),
-								Expression::Variable(v) => {
-									let offt = self.variable_offset(v);
-									// push decrements rsp before storing
-									let offt = offt.checked_add(8).unwrap();
-									dynasm!(self.jit
-										; push QWORD [rsp + offt]
-										; push QWORD [rsp + offt]
-									);
-									self.stack_offset += 16;
-									continue;
-								}
-								_ => todo!("argument {:?}", a),
-							};
-							self.stack_offset += self.push_stack_value((&v).into());
-							self.data.push(v);
-						}
-						if let Some([a, b]) = fn_str_val {
-							dynasm!(self.jit
-								; mov rax, QWORD b
-								; push rax
-								; mov rax, QWORD a
-								; push rax
-							);
-							self.stack_offset += 16;
-						}
-						if let Ok(n) = len.try_into() {
-							dynasm!(self.jit ; mov edi, DWORD n);
-						} else {
-							dynasm!(self.jit ; mov rdi, len.try_into().unwrap())
-						}
-						dynasm!(self.jit
-							; mov rsi, rsp
-						);
-					} else {
-						self.comment(|| "constant args");
-
-						// Push arguments
-						for a in arguments.into_vec() {
-							let v = match a {
-								Expression::String(s) => Value::String((&*s).into()),
-								Expression::Variable(_) => unreachable!(),
-								_ => todo!("argument {:?}", a),
-							};
-							self.data.push(v);
-						}
-						dynasm!(self.jit
-							; mov rdi, len.try_into().unwrap()
-							; lea rsi, [>data + (i * 16).try_into().unwrap()]
-						);
-					}
-
-					// Align stack to 16 bytes, then call
-					// Note that we didn't align the stack at the start of the function,
-					// so offset by 8
-					self.comment(|| "call");
-					if self.stack_offset % 16 != 8 {
-						dynasm!(self.jit ; push rbx);
-						self.stack_offset += 8;
-					}
-					dynasm!(self.jit
-						; mov rax, QWORD f as _
-						; call rax
-					);
-
-					// Restore stack
-					let offset = self.stack_offset - original_stack_offset;
-					if let Ok(n) = offset.try_into() {
-						dynasm!(self.jit ; add rsp, BYTE n);
-					} else {
-						dynasm!(self.jit ; add rsp, offset);
-					}
-					self.stack_offset = original_stack_offset;
-
-					// @? is now useable
-					self.retval_defined = true;
-				}
+					pipe_out,
+				} => self.compile_local_call(function, arguments, pipe_in, pipe_out),
+				Op::CallBuiltin {
+					function,
+					arguments,
+					pipe_in,
+					pipe_out,
+				} => self.compile_builtin_call(function, arguments, pipe_in, pipe_out),
+				Op::Exec {
+					arguments,
+					pipe_in,
+					pipe_out,
+				} => self.compile_builtin_call(
+					(self.resolve_fn)("exec").expect("'exec' not defined"),
+					arguments,
+					pipe_in,
+					pipe_out,
+				),
 				Op::If {
 					condition,
 					if_true,
@@ -652,9 +558,297 @@ where
 					self.comment(|| format!("@{} = {:?}", self.reg_to_var(variable), expression));
 					self.set_variable(variable, expression)
 				}
-				op => todo!("parse {:?}", op),
 			}
 		}
+	}
+
+	/// Compile a call to a local user-defined function.
+	fn compile_local_call(
+		&mut self,
+		function: &str,
+		arguments: Box<[Expression<'_>]>,
+		pipe_in: Box<[(RegisterIndex, &str)]>,
+		pipe_out: Box<[(&str, RegisterIndex)]>,
+	) {
+		self.comment(|| format!("call '{}'", function));
+		let (func, _) = &self.functions[function];
+		// Verify if arguments, pipe_in and pipe_out are correct as we may
+		// not potentially cause UB in safe code.
+		assert_eq!(
+			func.arguments.len(),
+			arguments.len(),
+			"argument mismatch (bug in op parser)"
+		);
+		assert_eq!(
+			func.pipe_in.len(),
+			pipe_in.len(),
+			"pipe_in mismatch (bug in op parser)"
+		);
+		assert_eq!(
+			func.pipe_out.len(),
+			pipe_out.len(),
+			"pipe_out mismatch (bug in op parser)"
+		);
+		let registers_len = func.registers.len();
+
+		// Calling convention: argv + inv + other virt regs + outv (rsp + 8)
+
+		let original_stack_offset = self.stack_offset;
+
+		// Align stack beforehand
+		// Note that we want to align on a mod 16 + 8 boundary so that the callee
+		// compensates properly.
+		let offt = (pipe_out.len() + pipe_in.len() * 2 + arguments.len() * 2) * 8;
+		let offt = if (i32::try_from(offt).unwrap() + self.stack_offset) % 16 == 8 {
+			dynasm!(self.jit
+				; push rbx
+			);
+			self.stack_offset += 8;
+		};
+
+		// Push pipe out
+		self.comment(|| "pipe out");
+		let (func, lbl) = &self.functions[function];
+		let lbl = *lbl;
+		'out: for (from, to) in pipe_out.into_vec().into_iter().rev() {
+			for &out in func.pipe_out.iter() {
+				if from == out {
+					let offt = self.variable_offset(to);
+					dynasm!(self.jit
+						; lea rax, [rsp + offt]
+						; push rax
+						;; self.stack_offset += 8
+					);
+					continue 'out;
+				}
+			}
+			dynasm!(self.jit
+				; push 0
+				;; self.stack_offset += 8
+			);
+		}
+
+		// Allocate other virtual registers
+		let l = ((registers_len - arguments.len() - pipe_in.len()) * 16)
+			.try_into()
+			.unwrap();
+		dynasm!(self.jit
+			;; self.comment(|| "set non-arg registers to nil")
+			; mov ecx, l
+			; xor eax, eax
+			; sub rsp, rcx
+			;; self.stack_offset += l
+			; mov rdi, rsp
+			; rep stosb
+		);
+
+		// Push pipe in
+		self.comment(|| "pipe in");
+		'inv: for (from, to) in pipe_in.into_vec().into_iter().rev() {
+			for &inv in func.pipe_in.iter() {
+				if to == inv {
+					let offt = self.variable_offset(from);
+					// push decrements rsp before storing
+					let offt = offt.checked_add(8).unwrap();
+					dynasm!(self.jit
+						; push QWORD [rsp + offt]
+						; push QWORD [rsp + offt]
+						;; self.stack_offset += 16
+					);
+					continue 'inv;
+				}
+			}
+			dynasm!(self.jit
+				; push 0
+				; push 0
+				;; self.stack_offset += 16
+			);
+		}
+
+		// Push args
+		self.comment(|| "args");
+		for a in arguments.into_vec().into_iter().rev() {
+			let v = match a {
+				Expression::String(s) => Value::String((&*s).into()),
+				Expression::Variable(v) => {
+					let offt = self.variable_offset(v);
+					// push decrements rsp before storing
+					let offt = offt.checked_add(8).unwrap();
+					dynasm!(self.jit
+						; push QWORD [rsp + offt]
+						; push QWORD [rsp + offt]
+						;; self.stack_offset += 16
+					);
+					continue;
+				}
+				_ => todo!("argument {:?}", a),
+			};
+			self.stack_offset += self.push_stack_value((&v).into());
+			self.data.push(v);
+		}
+
+		// Call
+		dynasm!(self.jit
+			;; self.comment(|| "call")
+			; call =>lbl
+		);
+
+		// Restore stack
+		dynasm!(self.jit
+			; add rsp, self.stack_offset - original_stack_offset
+		);
+		self.stack_offset = original_stack_offset;
+	}
+
+	/// Compile a call to a function.
+	fn compile_builtin_call(
+		&mut self,
+		function: QFunction,
+		arguments: Box<[Expression<'_>]>,
+		pipe_in: Box<[(RegisterIndex, &str)]>,
+		pipe_out: Box<[(&str, RegisterIndex)]>,
+	) {
+		self.comment(|| format!("call {:?}", &function));
+
+		// TODO should we clear pipe_out values before a call?
+
+		// The original stack offset, used to restore the stack.
+		let original_stack_offset = self.stack_offset;
+
+		// Create out list
+		self.comment(|| "out pipes");
+		let len = pipe_out.len().try_into().unwrap();
+		for (from, to) in pipe_out.into_vec() {
+			self.comment(|| format!("{} > @{}", from, self.reg_to_var(to)));
+			let str_offt = self.strings.len();
+			self.strings.push(from.len().try_into().unwrap());
+			self.strings.extend(from.bytes());
+			let offt = self.variable_offset(to);
+			dynasm!(self.jit
+				// value pointer
+				; lea rax, [rsp + offt]
+				; push rax
+				// name
+				; lea rax, [>strings + str_offt.try_into().unwrap()]
+				; push rax
+			);
+			self.stack_offset += 16;
+		}
+		dynasm!(self.jit
+			; mov edx, BYTE len
+			; mov rcx, rsp
+		);
+
+		// Create in list
+		self.comment(|| "in pipes");
+		let len = pipe_in.len().try_into().unwrap();
+		for (from, to) in pipe_in.into_vec() {
+			self.comment(|| format!("{} < @{}", to, self.reg_to_var(from)));
+			let str_offt = self.strings.len();
+			self.strings.push(to.len().try_into().unwrap());
+			self.strings.extend(to.bytes());
+			let offt = self.variable_offset(from).checked_add(8).unwrap();
+			dynasm!(self.jit
+				// value
+				; push QWORD [rsp + offt]
+				// value discriminant
+				; push QWORD [rsp + offt]
+				// name
+				; lea rax, [>strings + str_offt.try_into().unwrap()]
+				; push rax
+			);
+			self.stack_offset += 24;
+		}
+		dynasm!(self.jit
+			; mov r8, len
+			; mov r9, rsp
+		);
+
+		// Note start of data if all arguments are static.
+		let i = self.data.len();
+
+		// Figure out whether we need to use the stack.
+		let use_stack = arguments.iter().any(|a| match a {
+			Expression::Variable(_) => true,
+			_ => false,
+		});
+		let len = arguments.len();
+
+		// Create argument list
+		if use_stack {
+			self.comment(|| "dynamic args");
+
+			// Note that stack pushing is top-down
+			for a in arguments.into_vec().into_iter().rev() {
+				let v = match a {
+					Expression::String(s) => Value::String((&*s).into()),
+					Expression::Variable(v) => {
+						let offt = self.variable_offset(v);
+						// push decrements rsp before storing
+						let offt = offt.checked_add(8).unwrap();
+						dynasm!(self.jit
+							; push QWORD [rsp + offt]
+							; push QWORD [rsp + offt]
+						);
+						self.stack_offset += 16;
+						continue;
+					}
+					_ => todo!("argument {:?}", a),
+				};
+				self.stack_offset += self.push_stack_value((&v).into());
+				self.data.push(v);
+			}
+			if let Ok(n) = len.try_into() {
+				dynasm!(self.jit ; mov edi, DWORD n);
+			} else {
+				dynasm!(self.jit ; mov rdi, len.try_into().unwrap())
+			}
+			dynasm!(self.jit
+				; mov rsi, rsp
+			);
+		} else {
+			self.comment(|| "constant args");
+
+			// Push arguments
+			for a in arguments.into_vec() {
+				let v = match a {
+					Expression::String(s) => Value::String((&*s).into()),
+					Expression::Variable(_) => unreachable!(),
+					_ => todo!("argument {:?}", a),
+				};
+				self.data.push(v);
+			}
+			dynasm!(self.jit
+				; mov rdi, len.try_into().unwrap()
+				; lea rsi, [>data + (i * 16).try_into().unwrap()]
+			);
+		}
+
+		// Align stack to 16 bytes, then call
+		// Note that we didn't align the stack at the start of the function,
+		// so offset by 8
+		self.comment(|| "call");
+		if self.stack_offset % 16 != 8 {
+			dynasm!(self.jit ; push rbx);
+			self.stack_offset += 8;
+		}
+
+		dynasm!(self.jit
+			; mov rax, QWORD function.0 as _
+			; call rax
+		);
+
+		// Restore stack
+		let offset = self.stack_offset - original_stack_offset;
+		if let Ok(n) = offset.try_into() {
+			dynasm!(self.jit ; add rsp, BYTE n);
+		} else {
+			dynasm!(self.jit ; add rsp, offset);
+		}
+		self.stack_offset = original_stack_offset;
+
+		// @? is now useable
+		self.retval_defined = true;
 	}
 
 	fn set_variable(&mut self, var: RegisterIndex, expression: Expression) {
@@ -719,15 +913,14 @@ where
 	// Non-mutable to avoid borrow errors in trivial cases.
 	fn comment<R>(&self, comment: impl FnOnce() -> R)
 	where
-		R: AsRef<str> + Into<String>
+		R: AsRef<str> + Into<String>,
 	{
 		let _c = comment;
 		#[cfg(feature = "iced")]
 		{
 			let mut v = self.comments.take();
 			let c = _c();
-			v
-				.entry(self.jit.offset().0)
+			v.entry(self.jit.offset().0)
 				.and_modify(|s| {
 					*s += ", ";
 					*s += c.as_ref();
@@ -749,237 +942,5 @@ where
 	/// Map a register to a variable
 	fn reg_to_var(&self, reg: RegisterIndex) -> &'a str {
 		self.registers[usize::from(reg.0)].variable
-	}
-}
-
-#[cfg(test)]
-mod test {
-	use super::*;
-	use crate::op::*;
-	use crate::token::*;
-	use crate::wrap_ffi;
-	use core::cell::RefCell;
-
-	thread_local! {
-		static OUT: RefCell<String> = RefCell::default();
-		static COUNTER: RefCell<usize> = RefCell::default();
-	}
-
-	fn print(args: &[TValue], out: &mut [OutValue<'_>], inv: &[InValue<'_>]) -> isize {
-		let it = args
-			.iter()
-			.map(|v| v.to_string().chars().collect::<Vec<_>>())
-			.intersperse_with(|| Vec::from([' ']))
-			.flatten();
-		for o in out {
-			match o.name() {
-				"" | "1" => {
-					let s = (&it.chain(['\n']).collect::<String>()).into();
-					o.set_value(Value::String(s));
-					return 0;
-				}
-				_ => (),
-			}
-		}
-		OUT.with(|out| {
-			let mut out = out.borrow_mut();
-			out.extend(it);
-			out.push('\n');
-		});
-		0
-	}
-
-	fn exec(args: &[TValue], out: &mut [OutValue<'_>], inv: &[InValue<'_>]) -> isize {
-		use std::io::{Read, Write};
-		use std::process::{Command, Stdio};
-
-		let mut stdin = Stdio::null();
-		let mut val = None;
-		for i in inv {
-			if i.name() == "0" {
-				stdin = Stdio::piped();
-				val = Some(i.value());
-				break;
-			}
-		}
-		let mut cmd = Command::new(args[0].to_string())
-			.args(args[1..].iter().map(|a| a.to_string()))
-			.stdout(Stdio::piped())
-			.stdin(stdin)
-			.spawn()
-			.unwrap();
-		val.map(|val| {
-			cmd.stdin
-				.take()
-				.unwrap()
-				.write_all(val.to_string().as_bytes())
-				.unwrap()
-		});
-		let code = cmd.wait().unwrap().code().unwrap_or(-1).try_into().unwrap();
-		let stdout = cmd.stdout.unwrap();
-		let stdout = stdout.bytes().map(Result::unwrap).collect::<Vec<_>>();
-		let stdout = String::from_utf8_lossy(&stdout);
-		OUT.with(|o| {
-			for o in out {
-				match o.name() {
-					"" | "1" => {
-						o.set_value(Value::String((&*stdout).into()));
-						return;
-					}
-					_ => (),
-				}
-			}
-			o.borrow_mut().extend(stdout.chars())
-		});
-		code
-	}
-
-	fn count_to_10(_: &[TValue], _: &mut [OutValue<'_>], _: &[InValue<'_>]) -> isize {
-		COUNTER.with(|c| {
-			let mut c = c.borrow_mut();
-			*c += 1;
-			(*c > 10).then(|| 1).unwrap_or(0)
-		})
-	}
-
-	wrap_ffi!(ffi_print = print);
-	wrap_ffi!(ffi_exec = exec);
-	wrap_ffi!(ffi_count_to_10 = count_to_10);
-
-	fn clear_out() {
-		OUT.with(|out| out.borrow_mut().clear());
-		COUNTER.with(|c| *c.borrow_mut() = 0);
-	}
-
-	fn resolve_fn(f: &str) -> Option<QFunction> {
-		match f {
-			"print" => Some(ffi_print),
-			"exec" => Some(ffi_exec),
-			"split" => Some(ffi_split),
-			"count_to_10" => Some(ffi_count_to_10),
-			_ => None,
-		}
-	}
-
-	fn compile(s: &str) -> Function {
-		let ops = OpTree::new(TokenParser::new(s).map(Result::unwrap)).unwrap();
-		super::compile(ops, resolve_fn)
-	}
-
-	fn run(s: &str) {
-		clear_out();
-		compile(s).call(&[])
-	}
-
-	#[test]
-	fn hello() {
-		run("print Hello world!");
-		OUT.with(|out| assert_eq!("Hello world!\n", &*out.borrow()));
-	}
-
-	#[test]
-	fn echo() {
-		run("echo Hello world!");
-		OUT.with(|out| assert_eq!("Hello world!\n", &*out.borrow()));
-	}
-
-	#[test]
-	fn hello_echo() {
-		run("echo Hello; print world!");
-		OUT.with(|out| assert_eq!("Hello\nworld!\n", &*out.borrow()));
-	}
-
-	#[test]
-	fn cond_if() {
-		run("if true; print yes");
-		OUT.with(|out| assert_eq!("yes\n", &*out.borrow()));
-		run("if false; print yes");
-		OUT.with(|out| assert_eq!("", &*out.borrow()));
-	}
-
-	#[test]
-	fn call_if() {
-		run("if test -n \"aa\"; print yes");
-		OUT.with(|out| assert_eq!("yes\n", &*out.borrow()));
-		run("if test -n \"\"; print yes");
-		OUT.with(|out| assert_eq!("", &*out.borrow()));
-	}
-
-	#[test]
-	fn assign_variable() {
-		run("@a = $42;");
-		OUT.with(|out| assert_eq!("", &*out.borrow()));
-	}
-
-	#[test]
-	fn assign_variable_2() {
-		run("@a = $42; @b = forty_two");
-		OUT.with(|out| assert_eq!("", &*out.borrow()));
-	}
-
-	#[test]
-	fn print_variable() {
-		run("@a = xyz; print @a");
-		OUT.with(|out| assert_eq!("xyz\n", &*out.borrow()));
-	}
-
-	#[test]
-	fn print_variable_2() {
-		run("@a = 5; @b = \"five\"; print @a is pronounced as @b");
-		OUT.with(|out| assert_eq!("5 is pronounced as five\n", &*out.borrow()));
-	}
-
-	#[test]
-	fn print_pipe_print() {
-		run("print abc > ; print @");
-		OUT.with(|out| assert_eq!("abc\n\n", &*out.borrow()));
-	}
-
-	#[test]
-	fn ret_value() {
-		run("echo chickens are neat 1>; print output: @");
-		OUT.with(|out| assert_eq!("output: chickens are neat\n\n", &*out.borrow()));
-	}
-
-	#[test]
-	fn cat() {
-		run("echo chickens are neat 1>; cat 0<");
-		OUT.with(|out| assert_eq!("chickens are neat\n", &*out.borrow()));
-	}
-
-	#[test]
-	fn for_loop() {
-		run("printf abcde >; split \"\" < >; for a in @; print @a");
-		OUT.with(|out| assert_eq!("a\nb\nc\nd\ne\n", &*out.borrow()));
-	}
-
-	#[test]
-	fn for_if_loop() {
-		run("printf abcde\\n >; split < >; for a in @; if test -n @a; print @a");
-		OUT.with(|out| assert_eq!("abcde\n", &*out.borrow()));
-	}
-
-	#[test]
-	fn for_for_loop() {
-		run("@ = $0; for a in @; for b in @; print");
-		OUT.with(|out| assert_eq!("", &*out.borrow()));
-	}
-
-	#[test]
-	fn for_for_split_print() {
-		run("printf a.b/c.d >; split / < >; for a in @; (split . <a >a; for b in @a; print @b)");
-		OUT.with(|out| assert_eq!("a\nb\nc\nd\n", &*out.borrow()));
-	}
-
-	#[test]
-	fn while_loop() {
-		run("while count_to_10; print y");
-		OUT.with(|out| assert_eq!("y\ny\ny\ny\ny\ny\ny\ny\ny\ny\n", &*out.borrow()));
-	}
-
-	#[test]
-	fn block() {
-		run("@y = kek; if true; (print x; print @y; false); if @?; print z");
-		OUT.with(|out| assert_eq!("x\nkek\n", &*out.borrow()));
 	}
 }

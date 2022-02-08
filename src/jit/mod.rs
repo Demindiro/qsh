@@ -301,4 +301,16 @@ mod test {
 		run("fn foo a >x; print @a >x; foo abracadabra x>; print its @");
 		OUT.with(|out| assert_eq!("its abracadabra\n\n", &*out.borrow()));
 	}
+
+	#[test]
+	fn function_pipe_in() {
+		run("fn foo a <y; print @a @y; @ = beep; foo abracadabra y<");
+		OUT.with(|out| assert_eq!("abracadabra beep\n", &*out.borrow()));
+	}
+
+	#[test]
+	fn function_pipe_in_out() {
+		run("fn foo a >x <y; print @a >x @y; @ = beep; foo abracadabra x> y<; print its @");
+		OUT.with(|out| assert_eq!("its abracadabra beep\n\n", &*out.borrow()));
+	}
 }

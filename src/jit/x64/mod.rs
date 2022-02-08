@@ -223,17 +223,18 @@ where
 			self.symbol(name);
 			// Arguments to this function are not checked during compile time, so check
 			// during runtime.
-			// arguments: argv (rsi), outv (r8), inv (r9)
+			// arguments: argv + inv (rsi), outv (r8)
 			// Note that argv, outv and inv have a fixed size.
 			dynasm!(self.jit
 				; =>lbl
 			);
 			// Initialize virtual registers (TODO in pipes)
 			self.registers = f.registers;
-			self.insert_prologue(f.arguments.len());
+			let len = f.arguments.len() + f.pipe_in.len();
+			self.insert_prologue(len);
 			dynasm!(self.jit
-				;; self.comment(|| "copy arguments to virtual registers")
-				; mov ecx, (f.arguments.len() * 16).try_into().unwrap()
+				;; self.comment(|| "copy arguments & in pipes to virtual registers")
+				; mov ecx, (len * 16).try_into().unwrap()
 				; sub rsp, rcx
 				; mov rdi, rsp
 				; rep movsb
@@ -596,9 +597,32 @@ where
 			"pipe_out mismatch (bug in op parser)"
 		);
 
-		// Calling convention: argv (rsi), outv (r8), inv (r9)
+		// Calling convention: argv + inv (rsi), outv (r8)
 
 		let original_stack_offset = self.stack_offset;
+
+		// Push pipe in
+		self.comment(|| "pipe in");
+		'inv: for (from, to) in pipe_in.into_vec().into_iter().rev() {
+			for &inv in func.pipe_in.iter() {
+				if to == inv {
+					let offt = self.variable_offset(from);
+					// push decrements rsp before storing
+					let offt = offt.checked_add(8).unwrap();
+					dynasm!(self.jit
+						; push QWORD [rsp + offt]
+						; push QWORD [rsp + offt]
+						;; self.stack_offset += 16
+					);
+					continue 'inv;
+				}
+			}
+			dynasm!(self.jit
+				; push 0
+				; push 0
+				;; self.stack_offset += 16
+			);
+		}
 
 		// Push args
 		self.comment(|| "args");
@@ -612,8 +636,8 @@ where
 					dynasm!(self.jit
 						; push QWORD [rsp + offt]
 						; push QWORD [rsp + offt]
+						;; self.stack_offset += 16
 					);
-					self.stack_offset += 16;
 					continue;
 				}
 				_ => todo!("argument {:?}", a),
@@ -647,20 +671,6 @@ where
 		}
 		dynasm!(self.jit
 			; mov r8, rsp
-		);
-
-		// Push pipe in
-		self.comment(|| "pipe in");
-		for a in pipe_in.into_vec() {
-			dynasm!(self.jit
-				; push 0
-				; push 0
-				; push 0
-			);
-			self.stack_offset += 24;
-		}
-		dynasm!(self.jit
-			; mov r9, rsp
 		);
 
 		// Align stack

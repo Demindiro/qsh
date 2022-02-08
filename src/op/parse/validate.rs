@@ -19,7 +19,6 @@ where
 
 	/// Check for any error in a (sub-)tree.
 	fn validate_inner(&self, ops: &[Op<'a>]) -> Result<(), ParseError> {
-		dbg!(ops);
 		for op in ops.iter() {
 			match op {
 				Op::Call {

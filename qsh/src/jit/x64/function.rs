@@ -1,11 +1,11 @@
 //! Utilities for compiling functions & function calls.
 
-use core::arch::asm;
-use super::{X64Compiler, Function};
+use super::{Function, X64Compiler};
 use crate::op::{Expression, RegisterIndex};
-use crate::runtime::{QFunction, Value, TValue};
+use crate::runtime::{QFunction, TValue, Value};
+use core::arch::asm;
 use core::mem;
-use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi, AssemblyOffset};
+use dynasmrt::{dynasm, AssemblyOffset, DynasmApi, DynasmLabelApi};
 
 impl<'a, F> X64Compiler<'a, F>
 where
@@ -368,22 +368,29 @@ where
 }
 
 impl Function {
-    pub fn call(&self, args: &[TValue], status: isize) -> isize {
-        unsafe {
+	pub fn call(&self, args: &[TValue], status: isize) -> isize {
+		unsafe {
 			let f = mem::transmute(self.exec.ptr(AssemblyOffset(0)));
-            Self::call_inner(args.len(), args.as_ptr(), f, self.stack_bytes, status)
-        }
-    }
+			Self::call_inner(args.len(), args.as_ptr(), f, self.stack_bytes, status)
+		}
+	}
 
 	#[naked]
-    extern "C" fn call_inner(argc: usize, argv: *const TValue, f: extern "C" fn(), stack_bytes: usize, status: isize) -> isize {
+	extern "C" fn call_inner(
+		argc: usize,
+		argv: *const TValue,
+		f: extern "C" fn(),
+		stack_bytes: usize,
+		status: isize,
+	) -> isize {
 		// rdi: argc
 		// rsi: argv
 		// rdx: f
 		// rcx: stack_bytes
 		// r8: status
 		unsafe {
-			asm!("
+			asm!(
+				"
 				# Preserve original stack pointer
 				push rbp
 				mov rbp, rsp
@@ -399,7 +406,9 @@ impl Function {
 				mov rsp, rbp
 				pop rbp
 				ret
-			", options(noreturn))
+			",
+				options(noreturn)
+			)
 		}
-    }
+	}
 }

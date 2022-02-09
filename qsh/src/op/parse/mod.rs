@@ -4,6 +4,7 @@ mod validate;
 use super::{Expression, ForRange, Function, Op, Register, RegisterIndex, Types};
 use crate::runtime::QFunction;
 use crate::token::Token;
+use core::fmt;
 use core::iter::Peekable;
 use core::mem;
 use std::collections::BTreeMap;
@@ -372,3 +373,20 @@ pub enum ParseError {
 	PipeInMismatch,
 	PipeOutMismatch,
 }
+
+impl fmt::Display for ParseError {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		match self {
+			Self::CloseBlockWithoutOpen => "')' without '('",
+			Self::UnclosedBlock => "'(' without ')'",
+			Self::ExpectedVariable => "expected variable",
+			Self::ExpectedIn => "expected 'in'",
+			Self::UnexpectedPipeFrom => "unexpected '>'",
+			Self::UnexpectedPipeTo => "unexpected '<'",
+			_ => todo!(),
+		}
+		.fmt(f)
+	}
+}
+
+impl std::error::Error for ParseError {}

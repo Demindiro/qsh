@@ -1,10 +1,10 @@
 //! Utilities for creating interactive shells.
 
-use core::mem::MaybeUninit;
-use crate::token::{Token, TokenParser};
+use crate::jit;
 use crate::op::{Op, OpTree};
 use crate::runtime::QFunction;
-use crate::jit;
+use crate::token::{Token, TokenParser};
+use core::mem::MaybeUninit;
 
 /// An fixed-size stack with proper alignment.
 #[cfg_attr(target_arch = "x86_64", repr(align(16)))]
@@ -46,11 +46,11 @@ impl Shell {
 		dbg!(code);
 
 		let mut tokens = Vec::new();
-		TokenParser::new(code).try_fold((), |(), t| t.map(|t| tokens.push(t)))
+		TokenParser::new(code)
+			.try_fold((), |(), t| t.map(|t| tokens.push(t)))
 			.map_err(|_| ())?;
 
-		let mut ops = OpTree::new(tokens.into_iter(), resolve_fn)
-			.map_err(|_| ())?;
+		let mut ops = OpTree::new(tokens.into_iter(), resolve_fn).map_err(|_| ())?;
 
 		let mut func = jit::compile(ops, resolve_fn);
 

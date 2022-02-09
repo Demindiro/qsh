@@ -12,5 +12,16 @@
 pub mod jit;
 pub mod op;
 pub mod runtime;
-pub mod token;
 pub mod shell;
+pub mod token;
+
+/// Compile a script.
+pub fn compile<F>(s: &str, resolve_fn: F) -> Result<jit::Function, Box<dyn std::error::Error>>
+where
+	F: Fn(&str) -> Option<runtime::QFunction>,
+{
+	let mut tk = Vec::new();
+	token::TokenParser::new(s).try_for_each(|t| t.map(|t| tk.push(t)))?;
+	let ops = op::OpTree::new(tk.into_iter(), &resolve_fn)?;
+	Ok(jit::compile(ops, resolve_fn))
+}

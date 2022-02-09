@@ -16,15 +16,7 @@ pub struct Function {
 	symbols: Rc<BTreeMap<usize, Vec<Box<str>>>>,
 	#[cfg(feature = "iced")]
 	comments: BTreeMap<usize, String>,
-}
-
-impl Function {
-	pub fn call(&self, _args: &[TValue]) {
-		unsafe {
-			let f: extern "C" fn() = mem::transmute(self.exec.ptr(AssemblyOffset(0)));
-			f()
-		}
-	}
+	stack_bytes: usize,
 }
 
 #[cfg(not(feature = "iced"))]
@@ -159,7 +151,7 @@ mod test {
 		super::compile(ops, resolve_fn)
 	}
 
-	fn run(s: &str) {
+	fn run(s: &str) -> isize {
 		clear_out();
 		compile(s).call(&[])
 	}

@@ -1,10 +1,11 @@
 //! Utilities for compiling functions & function calls.
 
-use super::X64Compiler;
+use core::arch::asm;
+use super::{X64Compiler, Function};
 use crate::op::{Expression, RegisterIndex};
-use crate::runtime::{QFunction, Value};
+use crate::runtime::{QFunction, Value, TValue};
 use core::mem;
-use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
+use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi, AssemblyOffset};
 
 impl<'a, F> X64Compiler<'a, F>
 where
@@ -12,6 +13,7 @@ where
 {
 	/// Compile all functions.
 	pub(super) fn compile_functions(&mut self) {
+		let og_reg = mem::take(&mut self.registers);
 		for (name, (f, lbl)) in mem::take(&mut self.functions).into_iter() {
 			assert_eq!(self.stack_offset, 0, "stack is not properly restored");
 			self.symbol(name);
@@ -72,6 +74,7 @@ where
 				;; self.stack_offset -= 8
 			);
 		}
+		self.registers = og_reg;
 	}
 
 	/// Compile a call to a local user-defined function.
@@ -108,10 +111,10 @@ where
 		let original_stack_offset = self.stack_offset;
 
 		// Align stack beforehand
-		// Note that we want to align on a mod 16 + 8 boundary so that the callee
+		// Note that we want to align on a mod 16 boundary so that the callee
 		// compensates properly.
 		let offt = (pipe_out.len() + pipe_in.len() * 2 + arguments.len() * 2) * 8;
-		if (i32::try_from(offt).unwrap() + self.stack_offset) % 16 == 8 {
+		if (i32::try_from(offt).unwrap() + self.stack_offset) % 16 != 0 {
 			dynasm!(self.jit
 				; push rbx
 			);
@@ -340,7 +343,7 @@ where
 		// Note that we didn't align the stack at the start of the function,
 		// so offset by 8
 		self.comment(|| "call");
-		if self.stack_offset % 16 != 8 {
+		if self.stack_offset % 16 != 0 {
 			dynasm!(self.jit ; push rbx);
 			self.stack_offset += 8;
 		}
@@ -362,4 +365,39 @@ where
 		// @? is now useable
 		self.retval_defined = true;
 	}
+}
+
+impl Function {
+    pub fn call(&self, args: &[TValue]) -> isize {
+        unsafe {
+			let f = mem::transmute(self.exec.ptr(AssemblyOffset(0)));
+            Self::call_inner(args.len(), args.as_ptr(), f, self.stack_bytes)
+        }
+    }
+
+	#[naked]
+    extern "C" fn call_inner(argc: usize, argv: *const TValue, f: extern "C" fn(), stack_bytes: usize) -> isize {
+		// rdi: argc
+		// rsi: argv
+		// rdx: f
+		// rcx: stack_bytes
+		unsafe {
+			asm!("
+				# Preserve original stack pointer
+				push rbp
+				mov rbp, rsp
+				mov r8, rsp
+				# Allocate space for virtual registers & initialize to nil
+				sub rsp, rcx
+				xor eax, eax
+				mov rdi, rsp
+				rep stosb
+				call rdx
+				# Restore stack & return
+				mov rsp, rbp
+				pop rbp
+				ret
+			", options(noreturn))
+		}
+    }
 }

@@ -22,8 +22,9 @@ where
 	let mut jit = X64Compiler::new(resolve_fn, ops.registers.into(), ops.functions);
 
 	// main function
-	jit.insert_prologue(0);
+	jit.stack_offset += 8;
 	jit.compile(ops.ops);
+	jit.stack_offset -= 8;
 	jit.insert_epilogue();
 
 	// user defined functions
@@ -80,22 +81,10 @@ where
 		}
 	}
 
-	/// Insert the common function prologue.
-	fn insert_prologue(&mut self, argument_count: usize) {
-		self.comment(|| "set non-arg registers to nil");
-		let l = ((self.registers.len() - argument_count) * 16)
-			.try_into()
-			.unwrap();
-		self.stack_alloc_zeroed(l);
-	}
-
 	/// Insert the common function epilogue.
 	fn insert_epilogue(&mut self) {
 		assert_eq!(self.stack_offset, 0, "stack is not properly restored");
 		dynasm!(self.jit
-			;; self.comment(|| "return")
-			// stack OOB check was already done in insert_prologue, so just cast
-			; add rsp, (self.registers.len() * 16) as i32
 			; ret
 		);
 	}
@@ -138,6 +127,7 @@ where
 			symbols: Rc::new(self.symbols),
 			#[cfg(feature = "iced")]
 			comments: self.comments.take(),
+			stack_bytes: self.registers.len() * 16,
 		}
 	}
 

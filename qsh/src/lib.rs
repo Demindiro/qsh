@@ -4,6 +4,7 @@
 #![feature(core_intrinsics)]
 #![feature(if_let_guard)]
 #![feature(iter_intersperse)]
+#![feature(naked_functions)]
 #![feature(map_try_insert)]
 #![feature(maybe_uninit_uninit_array)]
 #![feature(trusted_len)]

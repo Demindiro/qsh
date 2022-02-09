@@ -52,6 +52,8 @@ impl Shell {
 
 		let mut func = jit::compile(ops, resolve_fn);
 
+		dbg!(&func);
+
 		func.call(&[]);
 
 		Ok(())

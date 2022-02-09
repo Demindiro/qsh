@@ -367,6 +367,7 @@ where
 }
 
 impl Function {
+	#[inline(always)]
 	pub fn call(&self, args: &[TValue], status: isize) -> isize {
 		unsafe {
 			let f = mem::transmute(self.exec.ptr(AssemblyOffset(0)));
@@ -409,5 +410,43 @@ impl Function {
 				options(noreturn)
 			)
 		}
+	}
+
+	/// Call with a pre-initialized stack.
+	///
+	/// # Safety
+	///
+	/// The stack has to be aligned on a 16 byte boundary.
+	#[inline]
+	pub unsafe fn call_with_stack(&self, stack: *const (), status: isize) -> isize {
+		let f = self.exec.ptr(AssemblyOffset(0));
+		let new_status;
+		asm!("
+			# Preserve original stack pointer
+			mov r12, rsp
+			# Switch to new stack
+			mov rsp, rdi
+			# Call
+			call rdx
+			# Restore stack
+			mov rsp, r12
+			",
+			lateout("r12") _,
+			in("rdi") stack,
+			in("rax") status,
+			in("rdx") f,
+			lateout("rax") new_status,
+			lateout("rdi") _,
+			lateout("rsi") _,
+			lateout("rdx") _,
+			lateout("rcx") _,
+			lateout("r8") _,
+			lateout("r9") _,
+			lateout("r10") _,
+			lateout("r11") _,
+			// *technically* we don't push anything on the *current* stack.
+			options(nostack),
+		);
+		new_status
 	}
 }

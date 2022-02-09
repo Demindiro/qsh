@@ -3,11 +3,11 @@ mod debug;
 mod function;
 mod stack;
 
+use std::borrow::Cow;
 use super::Function;
 use crate::op::{self, Expression, ForRange, Op, OpTree, RegisterIndex};
 use crate::runtime::*;
 use core::cell::Cell;
-
 use core::mem;
 use dynasmrt::x64;
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi, Register};
@@ -484,7 +484,7 @@ where
 	}
 
 	/// Map a register to a variable
-	fn reg_to_var(&self, reg: RegisterIndex) -> &'a str {
-		self.registers[usize::from(reg.0)].variable
+	fn reg_to_var(&self, reg: RegisterIndex) -> &str {
+		&self.registers[usize::from(reg.0)].variable
 	}
 }

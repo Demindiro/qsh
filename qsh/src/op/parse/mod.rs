@@ -36,13 +36,14 @@ where
 	/// Convert a series of tokens in a script.
 	pub fn parse_script<I>(
 		tokens: &mut Peekable<I>,
+		registers: Vec<Register<'a>>,
 		resolve_fn: F,
 	) -> Result<(Box<[Op<'a>]>, Self), ParseError>
 	where
 		I: Iterator<Item = Token<'a>>,
 	{
 		let mut s = Self {
-			registers: Default::default(),
+			registers,
 			functions: Some(Default::default()),
 			loop_depth: 0,
 			resolve_fn,
@@ -108,7 +109,7 @@ where
 			.iter()
 			.chain(&*pipe_in)
 			.map(|&variable| Register {
-				variable,
+				variable: variable.into(),
 				constant: false,
 				types: Types::ALL,
 			})
@@ -342,7 +343,7 @@ where
 		} else {
 			let i = self.registers.len();
 			self.registers.push(Register {
-				variable: var,
+				variable: var.into(),
 				constant: false,
 				types: Types::ALL,
 			});

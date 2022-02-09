@@ -22,6 +22,6 @@ where
 {
 	let mut tk = Vec::new();
 	token::TokenParser::new(s).try_for_each(|t| t.map(|t| tk.push(t)))?;
-	let ops = op::OpTree::new(tk.into_iter(), &resolve_fn)?;
+	let ops = op::OpTreeParser::new(&resolve_fn).parse(tk.into_iter())?;
 	Ok(jit::compile(ops, resolve_fn))
 }

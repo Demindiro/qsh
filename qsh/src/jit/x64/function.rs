@@ -14,9 +14,10 @@ where
 	/// Compile all functions.
 	pub(super) fn compile_functions(&mut self) {
 		let og_reg = mem::take(&mut self.registers);
-		for (name, (f, lbl)) in mem::take(&mut self.functions).into_iter() {
+		// TODO avoid clone()
+		for (name, (f, lbl)) in self.functions.clone() {
 			assert_eq!(self.stack_offset, 0, "stack is not properly restored");
-			self.symbol(name);
+			self.symbol(|| name);
 			// Arguments to this function are not checked during compile time, so check
 			// during runtime.
 			// arguments: argv + inv + other virt regs + outv (rsp + 8)
@@ -58,7 +59,7 @@ where
 						; mov rdx, [rsp + offt + 8]
 						; mov [rdi    ], rcx
 						; mov [rdi + 8], rdx
-						;; self.symbol("skip")
+						;; self.symbol(|| "skip")
 						; skip:
 					);
 				} else {
@@ -297,6 +298,7 @@ where
 			for a in arguments.into_vec().into_iter().rev() {
 				let v = match a {
 					Expression::String(s) => Value::String((&*s).into()),
+					Expression::Integer(s) => Value::Integer(s),
 					Expression::Variable(v) => {
 						let offt = self.variable_offset(v);
 						// push decrements rsp before storing
@@ -328,6 +330,7 @@ where
 			for a in arguments.into_vec() {
 				let v = match a {
 					Expression::String(s) => Value::String((&*s).into()),
+					Expression::Integer(s) => Value::Integer(s),
 					Expression::Variable(_) => unreachable!(),
 					_ => todo!("argument {:?}", a),
 				};

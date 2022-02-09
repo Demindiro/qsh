@@ -62,8 +62,8 @@ impl Shell {
 		// Move virtual registers on stack up.
 		let reg_size = mem::size_of::<Value>();
 		let stack_size = self.stack.0.len();
-		let old_range = stack_size - old_registers_len * reg_size .. stack_size;
-		let new_range = stack_size - self.registers.len() * reg_size .. stack_size;
+		let old_range = stack_size - old_registers_len * reg_size..stack_size;
+		let new_range = stack_size - self.registers.len() * reg_size..stack_size;
 		self.stack.0.copy_within(old_range, new_range.start);
 		// Clear old range.
 		let clear = stack_size - (self.registers.len() - old_registers_len) * reg_size;
@@ -73,11 +73,7 @@ impl Shell {
 		// The stack is properly aligned.
 		// Virtual registers are properly initialized.
 		unsafe {
-			let stack = self
-				.stack
-				.0
-				.as_ptr()
-				.add(new_range.start);
+			let stack = self.stack.0.as_ptr().add(new_range.start);
 			self.status = func.call_with_stack(stack.cast(), self.status);
 		}
 

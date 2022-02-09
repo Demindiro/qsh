@@ -9,12 +9,12 @@ pub use op::Op;
 pub use parse::ParseError;
 
 use crate::runtime::QFunction;
-use std::borrow::Cow;
 use crate::token::Token;
 use bitflags::bitflags;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Expression<'a> {
 	String(Box<str>),
 	Variable(RegisterIndex),
@@ -22,7 +22,7 @@ pub enum Expression<'a> {
 	Statement(Box<[Op<'a>]>),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ForRange {
 	Variable(RegisterIndex),
 }
@@ -42,9 +42,17 @@ pub struct Register<'a> {
 impl Register<'_> {
 	/// Make a register have a `'static` lifetime.
 	pub fn into_owned(self) -> Register<'static> {
-		let Self { variable, constant, types } = self;
+		let Self {
+			variable,
+			constant,
+			types,
+		} = self;
 		let variable = Cow::Owned(variable.into_owned());
-		Register { variable, constant, types }
+		Register {
+			variable,
+			constant,
+			types,
+		}
 	}
 }
 
@@ -124,12 +132,12 @@ where
 	where
 		I: Iterator<Item = Token<'a>>,
 	{
-		parse::Parser::parse_script(&mut tokens.peekable(), self.registers, &self.resolve_fn).map(|(ops, p)| {
-			OpTree {
+		parse::Parser::parse_script(&mut tokens.peekable(), self.registers, &self.resolve_fn).map(
+			|(ops, p)| OpTree {
 				ops,
 				registers: p.registers.into(),
 				functions: p.functions.unwrap(),
-			}
-		})
+			},
+		)
 	}
 }

@@ -3,7 +3,6 @@ mod debug;
 mod function;
 mod stack;
 
-use std::borrow::Cow;
 use super::Function;
 use crate::op::{self, Expression, ForRange, Op, OpTree, RegisterIndex};
 use crate::runtime::*;
@@ -11,6 +10,7 @@ use core::cell::Cell;
 use core::mem;
 use dynasmrt::x64;
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi, Register};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 #[cfg(feature = "iced")]
 use std::rc::Rc;
@@ -43,7 +43,7 @@ where
 	resolve_fn: F,
 	strings: Vec<u8>,
 	#[cfg(feature = "iced")]
-	symbols: BTreeMap<usize, Vec<Box<str>>>,
+	symbols: Cell<BTreeMap<usize, Vec<Box<str>>>>,
 	#[cfg(feature = "iced")]
 	comments: Cell<BTreeMap<usize, String>>,
 	stack_offset: i32,
@@ -61,6 +61,10 @@ where
 		functions: BTreeMap<&'a str, op::Function<'a>>,
 	) -> Self {
 		let mut jit = dynasmrt::x64::Assembler::new().unwrap();
+		let functions: BTreeMap<_, _> = functions
+			.into_iter()
+			.map(|(k, v)| (k, (v, jit.new_dynamic_label())))
+			.collect();
 		Self {
 			data: Default::default(),
 			resolve_fn,
@@ -71,10 +75,7 @@ where
 			comments: Default::default(),
 			stack_offset: 0,
 			registers,
-			functions: functions
-				.into_iter()
-				.map(|(k, v)| (k, (v, jit.new_dynamic_label())))
-				.collect(),
+			functions,
 			jit,
 		}
 	}
@@ -95,9 +96,10 @@ where
 			; data:
 		);
 		#[cfg(feature = "iced")]
+		let mut symbols = self.symbols.take();
+		#[cfg(feature = "iced")]
 		for i in 0..self.data.len() * 16 {
-			self.symbols
-				.insert(data_offset.0 + i, Vec::from([format!("data+{}", i).into()]));
+			symbols.insert(data_offset.0 + i, Vec::from([format!("data+{}", i).into()]));
 		}
 		for d in self.data {
 			let [a, b] = unsafe { mem::transmute::<_, [u64; 2]>(d) };
@@ -112,7 +114,7 @@ where
 		);
 		#[cfg(feature = "iced")]
 		for i in 0..self.strings.len() {
-			self.symbols.insert(
+			symbols.insert(
 				strings_offset.0 + i,
 				Vec::from([format!("strings+{}", i).into()]),
 			);
@@ -122,7 +124,7 @@ where
 			exec: self.jit.finalize().unwrap(),
 			data_offset,
 			#[cfg(feature = "iced")]
-			symbols: Rc::new(self.symbols),
+			symbols: Rc::new(symbols),
 			#[cfg(feature = "iced")]
 			comments: self.comments.take(),
 			stack_bytes: self.registers.len() * 16,
@@ -225,7 +227,7 @@ where
 						c => todo!("condition {:?}", c),
 					}
 					dynasm!(self.jit
-						;; self.symbol("if_end")
+						;; self.symbol(|| "if_end")
 						; =>if_true_lbl
 					);
 					self.compile(if_true);
@@ -237,12 +239,12 @@ where
 						);
 						self.compile(if_false);
 						dynasm!(self.jit
-							;; self.symbol("if_end")
+							;; self.symbol(|| "if_end")
 							; =>if_end
 						);
 					} else {
 						dynasm!(self.jit
-							;; self.symbol("if_false")
+							;; self.symbol(|| "if_false")
 							; =>if_false_lbl
 						);
 					}
@@ -287,7 +289,7 @@ where
 						;; self.comment(|| "check if array is empty")
 						; jmp =>for_array_check
 
-						;; self.symbol("for_array")
+						;; self.symbol(|| "for_array")
 						; =>for_array
 						;; self.comment(|| format!("load element into @{}", self.reg_to_var(variable)))
 						; mov rax, [rbx + 0]
@@ -300,7 +302,7 @@ where
 
 					dynasm!(self.jit
 
-						;; self.symbol("for_array_check")
+						;; self.symbol(|| "for_array_check")
 						; =>for_array_check
 						; add rbx, 16
 						; cmp rbx, r12
@@ -310,7 +312,7 @@ where
 						; pop r12
 						; pop rbx
 						;; self.stack_offset -= 16
-						;; self.symbol("for_end")
+						;; self.symbol(|| "for_end")
 						; =>for_end
 					);
 				}
@@ -326,14 +328,14 @@ where
 					dynasm!(self.jit
 						;; self.comment(|| "while")
 						; jmp =>while_test
-						;; self.symbol("while_true")
+						;; self.symbol(|| "while_true")
 						; =>while_true_lbl
 					);
 
 					self.compile(while_true);
 
 					dynasm!(self.jit
-						;; self.symbol("while_test")
+						;; self.symbol(|| "while_test")
 						; =>while_test
 					);
 
@@ -383,7 +385,7 @@ where
 								// There's also pipes, but idk how to handle them.
 								// Use ud2 as guard
 								; ud2
-								;; self.symbol("while_end")
+								;; self.symbol(|| "while_end")
 								; while_end:
 							);
 						}
@@ -474,13 +476,17 @@ where
 		}
 	}
 
-	fn symbol(&mut self, symbol: impl Into<String>) {
+	fn symbol<R>(&self, symbol: impl FnOnce() -> R)
+	where
+		R: Into<Box<str>>,
+	{
 		let _s = symbol;
 		#[cfg(feature = "iced")]
-		self.symbols
-			.entry(self.jit.offset().0)
-			.or_default()
-			.push(_s.into().into());
+		{
+			let mut v = self.symbols.take();
+			v.entry(self.jit.offset().0).or_default().push(_s().into());
+			self.symbols.set(v);
+		}
 	}
 
 	/// Map a register to a variable

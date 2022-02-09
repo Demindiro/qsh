@@ -1,7 +1,7 @@
 use super::{Op, Register};
 
 /// A `qsh` function defined with `fn`.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Function<'a> {
 	pub arguments: Box<[&'a str]>,
 	pub pipe_in: Box<[&'a str]>,

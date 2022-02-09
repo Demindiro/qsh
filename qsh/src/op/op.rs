@@ -1,7 +1,7 @@
 use super::{Expression, ForRange, RegisterIndex};
 use crate::runtime::QFunction;
 
-#[derive(PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Op<'a> {
 	/// A generic call. This refers osepy to user-defined functions if [`Parser::reduce`] has been
 	/// applied.

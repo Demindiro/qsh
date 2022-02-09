@@ -183,14 +183,16 @@ impl<'a> Iterator for TokenParser<'a> {
 						Some((_, 'o')) => (8, true),
 						Some((_, 'x')) => (16, true),
 						Some(&(_, c)) if '0' <= c && c <= '9' => (10, false),
+						Some((_, ';')) | Some((_, '\n')) | None => {
+							return Some(Err(TokenError::NoDigits))
+						}
 						Some(_) => return Some(Err(TokenError::InvalidDigit)),
-						None => return Some(Err(TokenError::NoDigits)),
 					};
 					skip.then(|| self.iter.next());
 					let mut n = None;
 					loop {
 						n = match self.iter.peek() {
-							Some((_, c)) if " ;".contains(|e| e == *c) => break,
+							Some((_, c)) if " ;\n".contains(|e| e == *c) => break,
 							Some((_, c)) => match c.to_digit(radix) {
 								Some(d) => {
 									self.iter.next();

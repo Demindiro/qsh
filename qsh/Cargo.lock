@@ -114,13 +114,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "qsh_shell"
-version = "0.1.0"
-dependencies = [
- "qsh",
-]
-
-[[package]]
 name = "quote"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -196,7 +196,10 @@ impl<'a> Iterator for TokenParser<'a> {
 							Some((_, c)) => match c.to_digit(radix) {
 								Some(d) => {
 									self.iter.next();
-									Some(n.unwrap_or(0) * 10 + isize::try_from(d).unwrap())
+									Some(
+										n.unwrap_or(0) * isize::try_from(radix).unwrap()
+											+ isize::try_from(d).unwrap(),
+									)
 								}
 								None => return Some(Err(TokenError::InvalidDigit)),
 							},

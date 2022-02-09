@@ -3,15 +3,15 @@ mod debug;
 mod function;
 mod stack;
 
+use std::borrow::Cow;
 use super::Function;
 use crate::op::{self, Expression, ForRange, Op, OpTree, RegisterIndex};
 use crate::runtime::*;
 use core::cell::Cell;
-use core::fmt;
 use core::mem;
 use dynasmrt::x64;
-use dynasmrt::{dynasm, AssemblyOffset, DynasmApi, DynasmLabelApi, ExecutableBuffer, Register};
-use std::collections::{btree_map::Entry, BTreeMap};
+use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi, Register};
+use std::collections::BTreeMap;
 #[cfg(feature = "iced")]
 use std::rc::Rc;
 
@@ -22,8 +22,9 @@ where
 	let mut jit = X64Compiler::new(resolve_fn, ops.registers.into(), ops.functions);
 
 	// main function
-	jit.insert_prologue(0);
+	jit.stack_offset += 8;
 	jit.compile(ops.ops);
+	jit.stack_offset -= 8;
 	jit.insert_epilogue();
 
 	// user defined functions
@@ -41,7 +42,6 @@ where
 	data: Vec<Value>,
 	resolve_fn: F,
 	strings: Vec<u8>,
-	retval_defined: bool,
 	#[cfg(feature = "iced")]
 	symbols: BTreeMap<usize, Vec<Box<str>>>,
 	#[cfg(feature = "iced")]
@@ -61,11 +61,10 @@ where
 		functions: BTreeMap<&'a str, op::Function<'a>>,
 	) -> Self {
 		let mut jit = dynasmrt::x64::Assembler::new().unwrap();
-		let mut s = Self {
+		Self {
 			data: Default::default(),
 			resolve_fn,
 			strings: Default::default(),
-			retval_defined: Default::default(),
 			#[cfg(feature = "iced")]
 			symbols: Default::default(),
 			#[cfg(feature = "iced")]
@@ -77,26 +76,13 @@ where
 				.map(|(k, v)| (k, (v, jit.new_dynamic_label())))
 				.collect(),
 			jit,
-		};
-		s
-	}
-
-	/// Insert the common function prologue.
-	fn insert_prologue(&mut self, argument_count: usize) {
-		self.comment(|| "set non-arg registers to nil");
-		let l = ((self.registers.len() - argument_count) * 16)
-			.try_into()
-			.unwrap();
-		self.stack_alloc_zeroed(l);
+		}
 	}
 
 	/// Insert the common function epilogue.
 	fn insert_epilogue(&mut self) {
 		assert_eq!(self.stack_offset, 0, "stack is not properly restored");
 		dynasm!(self.jit
-			;; self.comment(|| "return")
-			// stack OOB check was already done in insert_prologue, so just cast
-			; add rsp, (self.registers.len() * 16) as i32
 			; ret
 		);
 	}
@@ -139,6 +125,7 @@ where
 			symbols: Rc::new(self.symbols),
 			#[cfg(feature = "iced")]
 			comments: self.comments.take(),
+			stack_bytes: self.registers.len() * 16,
 		}
 	}
 
@@ -179,7 +166,7 @@ where
 					match condition {
 						// TODO use an enum for special variables
 						Expression::Variable(s) if self.reg_to_var(s) == "?" => {
-							assert!(self.retval_defined);
+							// rax is set even if no calls has been made as per our QSH ABI.
 							dynasm!(self.jit
 								;; self.comment(|| "if @?")
 								; test rax, rax
@@ -354,7 +341,6 @@ where
 					match condition {
 						// TODO use an enum for special variables
 						Expression::Variable(s) if self.reg_to_var(s) == "?" => {
-							assert!(self.retval_defined);
 							dynasm!(self.jit
 								;; self.comment(|| "if @?")
 								; test rax, rax
@@ -498,7 +484,7 @@ where
 	}
 
 	/// Map a register to a variable
-	fn reg_to_var(&self, reg: RegisterIndex) -> &'a str {
-		self.registers[usize::from(reg.0)].variable
+	fn reg_to_var(&self, reg: RegisterIndex) -> &str {
+		&self.registers[usize::from(reg.0)].variable
 	}
 }

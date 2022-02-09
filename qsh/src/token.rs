@@ -1,3 +1,4 @@
+use core::fmt;
 use core::iter::Peekable;
 use core::mem;
 use core::str::CharIndices;
@@ -34,10 +35,24 @@ pub enum TokenError {
 	UnclosedBlock,
 	UnexpectedCloseBlock,
 	UnterminatedString,
-	NoNameVariable,
 	NoDigits,
 	InvalidDigit,
 }
+
+impl fmt::Display for TokenError {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		match self {
+			Self::UnclosedBlock => "unclosed '('",
+			Self::UnexpectedCloseBlock => "unexpected ')'",
+			Self::UnterminatedString => "missing terminating '\"'",
+			Self::NoDigits => "$ without digits",
+			Self::InvalidDigit => "invalid digit in $",
+		}
+		.fmt(f)
+	}
+}
+
+impl std::error::Error for TokenError {}
 
 /// A queue of tokens to be returned
 enum Queue<'a> {

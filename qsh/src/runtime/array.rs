@@ -2,16 +2,8 @@ use super::{
 	arc_array::{ArcArray, TArcArray},
 	Value,
 };
-use core::alloc::Layout;
 use core::fmt;
-use core::marker::PhantomData;
 use core::ops::Deref;
-use core::ptr::NonNull;
-use core::sync::atomic::{AtomicUsize, Ordering};
-use std::alloc::{alloc, dealloc};
-use std::io::{self, Read};
-use std::process::{ChildStderr, ChildStdin, ChildStdout};
-use std::sync::{Mutex, MutexGuard};
 
 /// A fixed-sized array of [`Value`]s.
 #[derive(Clone)]
@@ -129,7 +121,7 @@ impl<'a> fmt::Display for TArray<'a> {
 fn fmt_display(a: &[Value], f: &mut fmt::Formatter) -> fmt::Result {
 	use fmt::Display;
 	f.write_str("[ ")?;
-	for (i, e) in a.into_iter().enumerate() {
+	for e in a.into_iter() {
 		f.write_str("\"")?;
 		e.to_string().escape_default().fmt(f)?;
 		f.write_str("\" ")?;

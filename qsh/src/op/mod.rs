@@ -9,9 +9,9 @@ pub use op::Op;
 pub use parse::ParseError;
 
 use crate::runtime::QFunction;
+use std::borrow::Cow;
 use crate::token::Token;
 use bitflags::bitflags;
-use core::iter::Peekable;
 use std::collections::BTreeMap;
 
 #[derive(Debug, PartialEq)]
@@ -28,15 +28,24 @@ pub enum ForRange {
 }
 
 /// A virtual register.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Register<'a> {
 	/// The variable this register corresponds to.
-	pub variable: &'a str,
+	pub variable: Cow<'a, str>,
 	/// Whether this register is constant, i.e. the value in this register is set only once
 	/// and is known at compile time.
 	pub constant: bool,
 	/// The types of variable this registers can hold.
 	pub types: Types,
+}
+
+impl Register<'_> {
+	/// Make a register have a `'static` lifetime.
+	pub fn into_owned(self) -> Register<'static> {
+		let Self { variable, constant, types } = self;
+		let variable = Cow::Owned(variable.into_owned());
+		Register { variable, constant, types }
+	}
 }
 
 bitflags! {
@@ -68,30 +77,59 @@ pub struct OpTree<'a> {
 }
 
 impl<'a> OpTree<'a> {
-	/// Convert an iterator of tokens to an [`OpTree`].
-	#[inline(always)]
-	pub fn new<I, F>(mut tokens: I, resolve_fn: F) -> Result<Self, ParseError>
-	where
-		I: Iterator<Item = Token<'a>>,
-		F: Fn(&str) -> Option<QFunction>,
-	{
-		parse::Parser::parse_script(&mut tokens.peekable(), &resolve_fn).map(|(ops, p)| Self {
-			ops,
-			registers: p.registers.into(),
-			functions: p.functions.unwrap(),
-		})
-	}
-
 	/// Get all registers that correspond to a variable
 	pub fn variable_registers<'b>(
 		&'b self,
 		variable: &'b str,
-	) -> impl Iterator<Item = (RegisterIndex, Register<'a>)> + 'b {
+	) -> impl Iterator<Item = (RegisterIndex, &'b Register<'a>)> + 'b {
 		self.registers
 			.iter()
-			.copied()
 			.enumerate()
 			.filter(move |(_, r)| r.variable == variable)
 			.map(|(i, r)| (RegisterIndex(i as u16), r))
+	}
+}
+
+/// A token parser to create an AST.
+pub struct OpTreeParser<'a, F>
+where
+	F: Fn(&str) -> Option<QFunction>,
+{
+	resolve_fn: F,
+	registers: Vec<Register<'a>>,
+}
+
+impl<'a, F> OpTreeParser<'a, F>
+where
+	F: Fn(&str) -> Option<QFunction>,
+{
+	/// Create a new token to AST converter.
+	#[inline(always)]
+	pub fn new(resolve_fn: F) -> Self {
+		Self {
+			resolve_fn,
+			registers: Default::default(),
+		}
+	}
+
+	/// Set pre-defined registers. Useful for interactive shells.
+	#[inline(always)]
+	pub fn with_registers(mut self, registers: impl Into<Vec<Register<'a>>>) -> Self {
+		self.registers = registers.into();
+		self
+	}
+
+	/// Convert an iterator of tokens to an [`OpTree`].
+	pub fn parse<I>(self, tokens: I) -> Result<OpTree<'a>, ParseError>
+	where
+		I: Iterator<Item = Token<'a>>,
+	{
+		parse::Parser::parse_script(&mut tokens.peekable(), self.registers, &self.resolve_fn).map(|(ops, p)| {
+			OpTree {
+				ops,
+				registers: p.registers.into(),
+				functions: p.functions.unwrap(),
+			}
+		})
 	}
 }

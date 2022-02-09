@@ -1,4 +1,3 @@
-use super::Value;
 use core::alloc::Layout;
 use core::iter::TrustedLen;
 use core::marker::PhantomData;

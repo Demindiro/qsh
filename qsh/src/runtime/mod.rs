@@ -8,7 +8,7 @@ pub use array::{Array, TArray};
 pub use pipe::{Pipe, TPipe};
 
 use core::fmt;
-use core::mem::{self, ManuallyDrop};
+use core::mem;
 use core::ptr::NonNull;
 use core::slice;
 use core::str;
@@ -259,7 +259,7 @@ pub fn exec(args: &[TValue], out: &mut [OutValue<'_>], inv: &[InValue<'_>]) -> i
 	}
 
 	match (cmd.stdout.take(), cmd.stderr.take()) {
-		(Some(o), Some(e)) => todo!("two streams"),
+		(Some(_), Some(_)) => todo!("two streams"),
 		(Some(mut o), None) => {
 			let mut b = Default::default();
 			o.read_to_end(&mut b).unwrap();
@@ -343,6 +343,16 @@ pub fn split(args: &[TValue], out: &mut [OutValue], inv: &[InValue<'_>]) -> isiz
 wrap_ffi!(pub FFI_PRINT = print);
 wrap_ffi!(pub FFI_EXEC  = exec );
 wrap_ffi!(pub FFI_SPLIT = split);
+
+/// Resolve a function by name.
+pub fn resolve_fn(f: &str) -> Option<QFunction> {
+	match f {
+		"print" => Some(FFI_PRINT),
+		"exec" => Some(FFI_EXEC),
+		"split" => Some(FFI_SPLIT),
+		_ => None,
+	}
+}
 
 #[cfg(test)]
 mod test {

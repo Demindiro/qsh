@@ -1,0 +1,10 @@
+[package]
+name = "qsh_shell"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+qsh = { path = "../qsh" }
+
+[features]
+default = ["qsh/catch_unwind"]

@@ -1,11 +1,6 @@
 use super::arc_array::{ArcArray, TArcArray};
-use core::alloc::Layout;
 use core::fmt;
-use core::marker::PhantomData;
 use core::ops::Deref;
-use core::ptr::{self, NonNull};
-use core::sync::atomic::{AtomicUsize, Ordering};
-use std::alloc::{alloc, dealloc};
 
 /// A reference-counted string usable with FFI.
 ///

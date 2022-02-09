@@ -4,6 +4,7 @@ mod validate;
 use super::{Expression, ForRange, Function, Op, Register, RegisterIndex, Types};
 use crate::runtime::QFunction;
 use crate::token::Token;
+use core::fmt;
 use core::iter::Peekable;
 use core::mem;
 use std::collections::BTreeMap;
@@ -35,13 +36,14 @@ where
 	/// Convert a series of tokens in a script.
 	pub fn parse_script<I>(
 		tokens: &mut Peekable<I>,
+		registers: Vec<Register<'a>>,
 		resolve_fn: F,
 	) -> Result<(Box<[Op<'a>]>, Self), ParseError>
 	where
 		I: Iterator<Item = Token<'a>>,
 	{
 		let mut s = Self {
-			registers: Default::default(),
+			registers,
 			functions: Some(Default::default()),
 			loop_depth: 0,
 			resolve_fn,
@@ -89,14 +91,15 @@ where
 		let mut args = Vec::new();
 		let mut pipe_in = Vec::new();
 		let mut pipe_out = Vec::new();
-		while let tk = tokens.next().expect("no token (bug in token parser?)") {
+		loop {
+			let tk = tokens.next().expect("no token (bug in token parser?)");
 			match tk {
 				Token::Word(arg) => args.push(arg),
 				Token::PipeIn { from, to: "" } => pipe_in.push(from),
 				Token::PipeOut { from: "", to } => pipe_out.push(to),
 				Token::Separator => break,
-				Token::PipeIn { to, .. } => return Err(ParseError::UnexpectedPipeFrom),
-				Token::PipeOut { from, .. } => return Err(ParseError::UnexpectedPipeTo),
+				Token::PipeIn { .. } => return Err(ParseError::UnexpectedPipeFrom),
+				Token::PipeOut { .. } => return Err(ParseError::UnexpectedPipeTo),
 				_ => return Err(ParseError::UnexpectedToken),
 			}
 		}
@@ -106,7 +109,7 @@ where
 			.iter()
 			.chain(&*pipe_in)
 			.map(|&variable| Register {
-				variable,
+				variable: variable.into(),
 				constant: false,
 				types: Types::ALL,
 			})
@@ -283,7 +286,6 @@ where
 		in_scope: bool,
 	) -> Result<Vec<Op<'a>>, ParseError> {
 		while let Some(tk) = tokens.next() {
-			let next_is_close = tokens.peek().map_or(true, |t| t == &Token::BlockClose);
 			match tk {
 				Token::BlockOpen => ops = self.parse_inner(ops, tokens, true)?,
 				Token::BlockClose => {
@@ -326,10 +328,10 @@ where
 
 	/// Allocate or get an existing register.
 	fn alloc_register(&mut self, var: &'a str, overwrite: bool) -> RegisterIndex {
-		if let Some((i, r)) = (!overwrite || !self.inside_loop())
+		if let Some((i, _)) = (!overwrite || !self.inside_loop())
 			.then(|| {
 				self.registers
-					.iter_mut()
+					.iter()
 					.enumerate()
 					.rev()
 					.find(|(_, r)| r.variable == var)
@@ -341,7 +343,7 @@ where
 		} else {
 			let i = self.registers.len();
 			self.registers.push(Register {
-				variable: var,
+				variable: var.into(),
 				constant: false,
 				types: Types::ALL,
 			});
@@ -372,3 +374,20 @@ pub enum ParseError {
 	PipeInMismatch,
 	PipeOutMismatch,
 }
+
+impl fmt::Display for ParseError {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		match self {
+			Self::CloseBlockWithoutOpen => "')' without '('",
+			Self::UnclosedBlock => "'(' without ')'",
+			Self::ExpectedVariable => "expected variable",
+			Self::ExpectedIn => "expected 'in'",
+			Self::UnexpectedPipeFrom => "unexpected '>'",
+			Self::UnexpectedPipeTo => "unexpected '<'",
+			_ => todo!(),
+		}
+		.fmt(f)
+	}
+}
+
+impl std::error::Error for ParseError {}

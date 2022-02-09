@@ -1,7 +1,5 @@
-use super::{Expression, Function, Op, ParseError, Parser};
+use super::{Op, ParseError, Parser};
 use crate::runtime::QFunction;
-use core::mem;
-use std::collections::BTreeMap;
 
 impl<'a, F> Parser<'a, F>
 where
@@ -50,7 +48,6 @@ where
 #[cfg(test)]
 mod test {
 	use super::super::super::test::*;
-	use super::*;
 
 	#[test]
 	fn too_little_args() {

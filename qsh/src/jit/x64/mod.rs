@@ -42,7 +42,6 @@ where
 	data: Vec<Value>,
 	resolve_fn: F,
 	strings: Vec<u8>,
-	retval_defined: bool,
 	#[cfg(feature = "iced")]
 	symbols: BTreeMap<usize, Vec<Box<str>>>,
 	#[cfg(feature = "iced")]
@@ -66,7 +65,6 @@ where
 			data: Default::default(),
 			resolve_fn,
 			strings: Default::default(),
-			retval_defined: Default::default(),
 			#[cfg(feature = "iced")]
 			symbols: Default::default(),
 			#[cfg(feature = "iced")]
@@ -168,7 +166,7 @@ where
 					match condition {
 						// TODO use an enum for special variables
 						Expression::Variable(s) if self.reg_to_var(s) == "?" => {
-							assert!(self.retval_defined);
+							// rax is set even if no calls has been made as per our QSH ABI.
 							dynasm!(self.jit
 								;; self.comment(|| "if @?")
 								; test rax, rax
@@ -343,7 +341,6 @@ where
 					match condition {
 						// TODO use an enum for special variables
 						Expression::Variable(s) if self.reg_to_var(s) == "?" => {
-							assert!(self.retval_defined);
 							dynasm!(self.jit
 								;; self.comment(|| "if @?")
 								; test rax, rax

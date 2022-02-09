@@ -363,7 +363,6 @@ where
 		self.stack_offset = original_stack_offset;
 
 		// @? is now useable
-		self.retval_defined = true;
 	}
 }
 

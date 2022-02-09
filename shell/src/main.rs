@@ -5,11 +5,12 @@ use qsh::runtime;
 
 fn main() -> Result<(), Box<dyn Error>> {
 	let mut sh = Shell::default();
+	let mut ret = 0;
 	loop {
-		eprint!("> ");
+		eprint!("{:>4} > ", ret);
 		let mut s = Default::default();
 		io::stdin().read_line(&mut s)?;
-		dbg!(sh.evaluate(&s, runtime::resolve_fn));
+		ret = sh.evaluate(&s, runtime::resolve_fn).unwrap_or(-9999);
 		s.clear();
 	}
 }

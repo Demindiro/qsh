@@ -27,6 +27,8 @@ impl Default for Stack {
 pub struct Shell {
 	/// Stack used for storing variables & executing commands.
 	stack: Stack,
+	/// The last status code returned by a call. Defaults to 0.
+	status: isize,
 }
 
 impl Shell {
@@ -37,7 +39,7 @@ impl Shell {
 	const VREG_CAPACITY_GROW: usize = 8;
 
 	/// Feed a string of code, parsing & executing it if it is complete.
-	pub fn evaluate<F>(&mut self, code: &str, resolve_fn: F) -> Result<(), ()>
+	pub fn evaluate<F>(&mut self, code: &str, resolve_fn: F) -> Result<isize, ()>
 	where
 		F: Fn(&str) -> Option<QFunction> + Copy,
 	{
@@ -54,8 +56,7 @@ impl Shell {
 
 		dbg!(&func);
 
-		func.call(&[]);
-
-		Ok(())
+		self.status = func.call(&[], self.status);
+		Ok(self.status)
 	}
 }

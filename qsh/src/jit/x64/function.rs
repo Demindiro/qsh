@@ -368,30 +368,32 @@ where
 }
 
 impl Function {
-    pub fn call(&self, args: &[TValue]) -> isize {
+    pub fn call(&self, args: &[TValue], status: isize) -> isize {
         unsafe {
 			let f = mem::transmute(self.exec.ptr(AssemblyOffset(0)));
-            Self::call_inner(args.len(), args.as_ptr(), f, self.stack_bytes)
+            Self::call_inner(args.len(), args.as_ptr(), f, self.stack_bytes, status)
         }
     }
 
 	#[naked]
-    extern "C" fn call_inner(argc: usize, argv: *const TValue, f: extern "C" fn(), stack_bytes: usize) -> isize {
+    extern "C" fn call_inner(argc: usize, argv: *const TValue, f: extern "C" fn(), stack_bytes: usize, status: isize) -> isize {
 		// rdi: argc
 		// rsi: argv
 		// rdx: f
 		// rcx: stack_bytes
+		// r8: status
 		unsafe {
 			asm!("
 				# Preserve original stack pointer
 				push rbp
 				mov rbp, rsp
-				mov r8, rsp
 				# Allocate space for virtual registers & initialize to nil
 				sub rsp, rcx
 				xor eax, eax
 				mov rdi, rsp
 				rep stosb
+				mov rax, r8
+				# Set previous status & call
 				call rdx
 				# Restore stack & return
 				mov rsp, rbp

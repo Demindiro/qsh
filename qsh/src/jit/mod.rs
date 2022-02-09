@@ -153,7 +153,7 @@ mod test {
 
 	fn run(s: &str) -> isize {
 		clear_out();
-		compile(s).call(&[])
+		compile(s).call(&[], 0)
 	}
 
 	#[test]

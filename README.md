@@ -2,9 +2,9 @@
 
 ## Goals
 
-- Concise syntax for executing functions & programs
+- Concise & simple syntax for executing functions & programs
 - Easy to define *and save* functions & variables (REPL-esque)
-- Make accidental security exploits hard (see `bash`)
+- Make accidental security vulnerabilities hard (see `bash`)
 - Efficient piping of data between processes
 
 ## Example
@@ -14,35 +14,39 @@
 
 print Files in directory:
 
-ls 1>ls
-split 0<ls 1>ls sep<"\n"
-for file in @ls (
-	print "  " @file sep=""
+ls >
+split < >
+print @
+for file in @; (
+	file @file >type
+	if @file; print ">" @file is @type
 )
 
-fn random
-	@ = 4
+fn random >
+	@ = $4
 
-fn rand_either a b (
-	if (random) % 2 == 0
-		@ = @a
-	else
-		@ = @b
+fn rand_either a b >r; (
+	random >
+	expr @ % 2 >
+	printf %c @ >
+	@r = @a
+	if test @ -eq 1
+		@r = @b
 )
 
 print random                      # Prints "random"
 random >; print @                 # Calls the random function and prints the return value
-rand_either foo bar >; print @    # Prints either "foo" or "bar"
+rand_either foo bar r>; print @   # Prints either "foo" or "bar"
 
 print 0000    # Prints 0000
 print $0000   # Prints 0
 print $xff    # Prints 255
-
-@list = [$1, bar]
-@map = {foo: $2}
 ```
 
 ## Specification
+
+**Note:** This specification is not yet complete and is subject to change.
+The shell does not implement all features yet either.
 
 - Separators: `;`, `\n`
 - Scope: `{ a; b; ...; ret }`
@@ -59,7 +63,7 @@ print $xff    # Prints 255
 - Integers
 - Pipes
 - Arrays
-- Dictionaries
+- Dictionaries (TODO)
 
 
 ### Functions
@@ -69,6 +73,8 @@ extracted using pipes.
 
 
 ### Streams
+
+**Note:** none of this is implemented. Output is collected into a string.
 
 The main mechanism for exchanging data with programs are streams: data is
 continuously written and read from a stream.

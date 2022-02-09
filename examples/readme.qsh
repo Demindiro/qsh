@@ -1,0 +1,31 @@
+#!/usr/bin/env qsh
+
+print Files in directory:
+
+ls >
+split < >
+print @
+for file in @; (
+	file @file >type
+	if @file; print ">" @file is @type
+)
+
+fn random >
+	@ = $4
+
+fn rand_either a b >r; (
+	random >
+	expr @ % 2 >
+	printf %c @ >
+	@r = @a
+	if test @ -eq 1
+		@r = @b
+)
+
+print random                      # Prints "random"
+random >; print @                 # Calls the random function and prints the return value
+rand_either foo bar r>; print @   # Prints either "foo" or "bar"
+
+print 0000    # Prints 0000
+print $0000   # Prints 0
+print $xff    # Prints 255

@@ -413,16 +413,26 @@ where
 	}
 
 	fn set_variable(&mut self, var: RegisterIndex, expression: Expression) {
+		let dst = self.variable_offset(var);
 		let val = match expression {
 			Expression::String(v) => Value::String((&*v).into()),
 			Expression::Integer(v) => Value::Integer(v.into()),
-			_ => todo!(),
+			Expression::Variable(v) => {
+				let src = self.variable_offset(v);
+				dynasm!(self.jit
+					; mov rcx, [rsp + src    ]
+					; mov rdx, [rsp + src + 8]
+					; mov [rsp + dst    ], rcx
+					; mov [rsp + dst + 8], rdx
+				);
+				return;
+			}
+			e => todo!("parse {:?}", e),
 		};
-		let i = self.variable_offset(var);
 		// FIXME transmuting Value::Nil is technically UB because part of it is unitialized.
 		let [a, b] = unsafe { mem::transmute::<_, [i64; 2]>(val) };
-		self.mov_const(x64::Rq::RSP, i, a);
-		self.mov_const(x64::Rq::RSP, i.checked_add(8).unwrap(), b);
+		self.mov_const(x64::Rq::RSP, dst, a);
+		self.mov_const(x64::Rq::RSP, dst.checked_add(8).unwrap(), b);
 	}
 
 	/// Get the current offset of a variable in bytes. This includes the stack offset.

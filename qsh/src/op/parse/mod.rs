@@ -122,7 +122,7 @@ where
 			resolve_fn,
 		};
 		// Parse function body
-		let ops = match func.parse_expr(tokens)? {
+		let ops = match func.parse_statement(tokens)? {
 			Expression::Statement(ops) => ops,
 			Expression::Integer(_) | Expression::String(_) | Expression::Variable(_) => [].into(),
 		};
@@ -162,7 +162,7 @@ where
 	{
 		Ok(Op::If {
 			condition: self.parse_expr(tokens)?,
-			if_true: match self.parse_expr(tokens)? {
+			if_true: match self.parse_statement(tokens)? {
 				Expression::Statement(c) => c,
 				_ => [].into(), // TODO
 			},
@@ -187,7 +187,7 @@ where
 				Ok(Op::For {
 					variable: self.alloc_register(variable, true),
 					range,
-					for_each: match self.parse_expr(tokens)? {
+					for_each: match self.parse_statement(tokens)? {
 						Expression::Statement(v) => v,
 						t => todo!("{:?} for_each in for loop", t),
 					},
@@ -208,7 +208,7 @@ where
 		self.loop_depth += 1;
 		let op = Op::While {
 			condition: self.parse_expr(tokens)?,
-			while_true: match self.parse_expr(tokens)? {
+			while_true: match self.parse_statement(tokens)? {
 				Expression::Statement(c) => c,
 				_ => [].into(), // TODO
 			},
@@ -276,6 +276,33 @@ where
 			Token::Integer(s) => Ok(Expression::Integer(s)),
 			Token::Separator => todo!("unexpected separator (should we allow this?)"),
 			t => todo!("parse {:?}", t),
+		}
+	}
+
+	/// Parse a "statement" in a function, i.e. `fn foo; <stmt>`, `if true; <stmt>`, ..
+	fn parse_statement<I>(&mut self, tokens: &mut Peekable<I>) -> Result<Expression<'a>, ParseError>
+	where
+		I: Iterator<Item = Token<'a>>,
+	{
+		match tokens.peek() {
+			// parse_expr doesn't allow assignments, so handle it manually
+			Some(&Token::Variable(s)) => {
+				tokens.next().unwrap();
+				match tokens.next().expect("expected token") {
+					Token::Separator => Ok(Expression::Variable(
+						self.alloc_register(s, self.inside_loop()),
+					)),
+					Token::Word("=") => Ok(Expression::Statement(
+						[Op::Assign {
+							variable: self.alloc_register(s, self.inside_loop()),
+							expression: self.parse_expr(tokens)?,
+						}]
+						.into(),
+					)),
+					t => todo!("parse {:?}", t),
+				}
+			}
+			_ => self.parse_expr(tokens),
 		}
 	}
 
